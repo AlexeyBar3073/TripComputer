@@ -1,0 +1,2347 @@
+// ======================================================================
+// Собранный проект: \TripComputer
+// Дата сборки: C:\Users\Алексей\Documents\PlatformIO\Projects\TripComputer
+// ======================================================================
+
+// START platformio.ini
+// ======================================================================
+; PlatformIO Project Configuration File
+;
+;   Build options: build flags, source filter
+;   Upload options: custom upload port, speed and extra flags
+;   Library options: dependencies, extra library storages
+;   Advanced options: extra scripting
+;
+; Please visit documentation for the other options and examples
+; https://docs.platformio.org/page/projectconf.html
+
+[env:wemos_d1_mini32]
+platform = espressif32
+board = wemos_d1_mini32
+framework = arduino
+upload_speed = 921600
+monitor_speed = 115200
+build_flags = -DDEBUG_ENABLE
+upload_resetmethod = nodemcu
+lib_deps = bblanchon/ArduinoJson
+// END platformio.ini
+
+
+// START src/core/logging.h
+// ======================================================================
+/**
+ * @file logging.h
+ * @brief Макросы логирования с поддержкой DEBUG/RELEASE
+ * 
+ * Особенности:
+ * - В RELEASE сборке логи полностью исключаются из бинарника
+ * - Используется буфер фиксированного размера (LOG_BUF_SIZE = 128)
+ * - Без malloc, без фрагментации кучи
+ * 
+ * Использование:
+ *   LOG_INFO("Module", "message");
+ *   LOG_ERROR("Router", "code=%d", err);
+ */
+
+#ifndef LOGGING_H
+#define LOGGING_H
+
+#include <Arduino.h>
+
+// ------------ Глобальный флаг отладки ------------
+// Определи в platformio.ini: -DDEBUG_ENABLE
+// Или комментируй здесь для RELEASE
+// #define DEBUG_ENABLE
+
+// ------------ Размер буфера ------------
+#define LOG_BUF_SIZE 128
+
+// ------------ Уровни логов ------------
+#define LOG_LEVEL_NONE  0
+#define LOG_LEVEL_ERROR 1
+#define LOG_LEVEL_INFO  2
+#define LOG_LEVEL_DEBUG 3
+
+// Установи текущий уровень (можно менять в runtime)
+#ifndef LOG_LEVEL
+  #ifdef DEBUG_ENABLE
+    #define LOG_LEVEL LOG_LEVEL_DEBUG
+  #else
+    #define LOG_LEVEL LOG_LEVEL_NONE
+  #endif
+#endif
+
+// ------------ Внутренний макрос ------------
+#ifdef DEBUG_ENABLE
+  #define LOG_PRINT(level, tag, fmt, ...) do {                                \
+    if (LOG_LEVEL >= level) {                                                 \
+      static char log_buf[LOG_BUF_SIZE];                                      \
+      const char* level_str = (level == LOG_LEVEL_ERROR) ? "E" :              \
+                              (level == LOG_LEVEL_INFO)  ? "I" : "D";         \
+      int prefix_len = snprintf(log_buf, LOG_BUF_SIZE, "[%s][%s] ",           \
+                                level_str, tag);                              \
+      if (prefix_len < LOG_BUF_SIZE - 1) {                                    \
+        snprintf(log_buf + prefix_len, LOG_BUF_SIZE - prefix_len,             \
+                 fmt, ##__VA_ARGS__);                                         \
+      }                                                                       \
+      Serial.println(log_buf);                                                \
+    }                                                                         \
+  } while(0)
+#else
+  // В RELEASE сборке — полное исключение
+  #define LOG_PRINT(level, tag, fmt, ...) ((void)0)
+#endif
+
+// ------------ Удобные макросы ------------
+#define LOG_ERROR(tag, fmt, ...) LOG_PRINT(LOG_LEVEL_ERROR, tag, fmt, ##__VA_ARGS__)
+#define LOG_INFO(tag, fmt, ...)  LOG_PRINT(LOG_LEVEL_INFO,  tag, fmt, ##__VA_ARGS__)
+#define LOG_DEBUG(tag, fmt, ...) LOG_PRINT(LOG_LEVEL_DEBUG, tag, fmt, ##__VA_ARGS__)
+
+// ------------ Assert с логом ------------
+#ifdef DEBUG_ENABLE
+  #define LOG_ASSERT(cond, tag, msg) do {                                     \
+    if (!(cond)) {                                                            \
+      LOG_ERROR(tag, "ASSERT: %s", msg);                                      \
+    }                                                                         \
+  } while(0)
+#else
+  #define LOG_ASSERT(cond, tag, msg) ((void)0)
+#endif
+
+#endif // LOGGING_H
+// END src/core/logging.h
+
+
+// START src/core/message.h
+// ======================================================================
+#ifndef MESSAGE_H
+#define MESSAGE_H
+
+#include <stdint.h>
+#include <string.h>
+
+#define MSG_PAYLOAD_MAX 512
+
+enum class MsgType : uint8_t {
+    FAST = 0,
+    FULL = 1
+};
+
+namespace Topic {
+    constexpr uint16_t SYSTEM       = 1 << 0;
+    constexpr uint16_t SENSOR       = 1 << 1;
+    constexpr uint16_t PROTOCOL     = 1 << 2;
+    constexpr uint16_t OTA          = 1 << 3;
+    constexpr uint16_t STORAGE      = 1 << 4;
+    constexpr uint16_t CALCULATOR   = 1 << 5;
+    constexpr uint16_t ENGINE       = 1 << 6;
+    constexpr uint16_t KLINE        = 1 << 7;
+    constexpr uint16_t SERVICE      = 1 << 8;
+    constexpr uint16_t TRANSPORT    = 1 << 9;
+    constexpr uint16_t ALL          = 0xFFFF;
+}
+
+enum Command : uint8_t {
+    CMD_NONE            = 0x00,
+
+    // Управление trip/топливом (Calculator)
+    CMD_RESET_TRIP_A    = 0x01,
+    CMD_RESET_TRIP_B    = 0x02,
+    CMD_RESET_AVG       = 0x03,
+    CMD_FULL_TANK       = 0x04,
+    CMD_CORRECT_ODO     = 0x05,
+
+    // Настройки (Protocol)
+    CMD_GET_CFG         = 0x06,
+    CMD_SET_CFG         = 0x07,
+
+    // K-Line диагностика
+    CMD_KL_GET_DTC      = 0x08,
+    CMD_KL_CLEAR_DTC    = 0x09,
+    CMD_KL_RESET_ADAPT  = 0x0A,
+    CMD_KL_PUMP_ATF     = 0x0B,
+    CMD_KL_DETECT_PROTO = 0x0C,
+
+    // Калибровка (Engine)
+    CMD_CALIBRATE_SPEED    = 0x0D,
+    CMD_CALIBRATE_INJECTOR = 0x0E,
+    CMD_CALIBRATE_DEADTIME = 0x0F,
+
+    // OTA
+    CMD_OTA_END         = 0x10,
+    CMD_OTA_START       = 0x11,
+    
+    // Транспорт
+    CMD_TRANSPORT_STATUS = 0x12,
+};
+
+struct FastMsg {
+    uint16_t topic;
+    uint8_t  cmd;
+    uint8_t  reserved;
+    uint32_t timestamp;
+    uint64_t value;
+};
+
+struct FullMsg {
+    uint16_t topic;
+    uint8_t  cmd;
+    uint8_t  reserved;
+    uint16_t msgId;
+    uint16_t payloadSize;
+    uint8_t  payload[MSG_PAYLOAD_MAX];
+};
+
+struct Message {
+    MsgType type;
+    
+    union {
+        FastMsg fast;
+        FullMsg full;
+    };
+    
+    Message() : type(MsgType::FAST) {
+        memset(&fast, 0, sizeof(fast));
+    }
+    
+    static Message createFast(uint16_t topic, uint8_t cmd, uint64_t value) {
+        Message msg;
+        msg.type = MsgType::FAST;
+        msg.fast.topic = topic;
+        msg.fast.cmd = cmd;
+        msg.fast.reserved = 0;
+        msg.fast.timestamp = 0;
+        msg.fast.value = value;
+        return msg;
+    }
+    
+    static Message createFull(uint16_t topic, uint8_t cmd, 
+                              const uint8_t* data, uint16_t size) {
+        Message msg;
+        msg.type = MsgType::FULL;
+        msg.full.topic = topic;
+        msg.full.cmd = cmd;
+        msg.full.reserved = 0;
+        msg.full.msgId = 0;
+        msg.full.payloadSize = (size > MSG_PAYLOAD_MAX) ? MSG_PAYLOAD_MAX : size;
+        if (data && msg.full.payloadSize > 0) {
+            memcpy(msg.full.payload, data, msg.full.payloadSize);
+        }
+        return msg;
+    }
+};
+
+#endif
+// END src/core/message.h
+
+
+// START src/core/module.h
+// ======================================================================
+/**
+ * @file module.h
+ * @brief Базовый класс для всех модулей системы.
+ * 
+ * НОВОЕ: подписка на команды через subscribeCommand().
+ * onMessage() автоматически фильтрует по Topic и Command,
+ * вызывает onCommand() для команд из списка, onData() для Pack-ов.
+ */
+
+#ifndef MODULE_H
+#define MODULE_H
+
+#include "message.h"
+#include "logging.h"
+#include <Arduino.h>
+
+#define MODULE_MAX_COMMANDS 8
+
+class Module {
+public:
+    const char* name;
+    
+    explicit Module(const char* moduleName, uint16_t topic = 0)
+        : name(moduleName)
+        , subscribedTopic(topic)
+        , commandCount(0)
+    {
+        memset(commands, 0, sizeof(commands));
+    }
+    
+    virtual ~Module() = default;
+    virtual bool init() { return true; }
+    
+    virtual void onMessage(const Message& msg) {
+        uint16_t topic = (msg.type == MsgType::FAST) ? msg.fast.topic : msg.full.topic;
+        uint8_t  cmd   = (msg.type == MsgType::FAST) ? msg.fast.cmd   : msg.full.cmd;
+        
+        if (subscribedTopic != 0 && !(subscribedTopic & topic)) return;
+        
+        if (commandCount > 0) {
+            for (uint8_t i = 0; i < commandCount; i++) {
+                if (commands[i] == cmd) {
+                    onCommand(cmd, msg);
+                    return;
+                }
+            }
+        }
+        
+        if (commandCount == 0 && cmd == CMD_NONE) {
+            onData(msg);
+        }
+    }
+    
+    virtual void onCommand(uint8_t cmd, const Message& msg) {}
+    virtual void onData(const Message& msg) {}
+    virtual void tick() {}
+    virtual void reset() {}
+    
+protected:
+    void subscribeCommand(uint8_t cmd) {
+        if (commandCount < MODULE_MAX_COMMANDS) {
+            commands[commandCount++] = cmd;
+        }
+    }
+    
+    using SendCallback = void (*)(const Message&);
+    SendCallback send = nullptr;
+    friend class Router;
+    
+private:
+    uint16_t subscribedTopic;
+    uint8_t  commands[MODULE_MAX_COMMANDS];
+    uint8_t  commandCount;
+};
+
+#endif // MODULE_H
+// END src/core/module.h
+
+
+// START src/core/packets.h
+// ======================================================================
+/**
+ * @file packets.h
+ * @brief Агрегированные пакеты данных для шины Router.
+ * 
+ * Взят из эталонной прошивки Bluetooth_connect_v2 v6.8.22.
+ * #pragma pack(1) для прямой бинарной сериализации в NVS.
+ */
+
+#ifndef PACKETS_H
+#define PACKETS_H
+
+#include <stdint.h>
+#include <stdbool.h>
+
+// =============================================================================
+// EnginePack — FAST-телеметрия (публикуется каждые 100 мс)
+// =============================================================================
+#pragma pack(push, 1)
+typedef struct {
+    uint8_t  version;           // Версия пакета (текущая: 3)
+    float    speed;             // Скорость автомобиля (км/ч)
+    float    rpm;               // Обороты двигателя (об/мин)
+    float    voltage;           // Напряжение бортсети (В)
+    bool     engine_running;    // Двигатель работает
+    bool     parking_lights;    // Габаритные огни
+    float    instant_fuel;      // Мгновенный расход (л/100км или л/ч)
+    float    distance;          // Накопленный пробег за поездку (км)
+    float    fuel_used;         // Накопленный расход за поездку (л)
+    float    fuel_level_sensor; // Остаток топлива в баке (л)
+    bool     not_fuel;          // true = датчик топлива отсутствует
+} EnginePack;
+#pragma pack(pop)
+
+// =============================================================================
+// TripPack — TRIP-телеметрия (публикуется каждые 1000 мс)
+// =============================================================================
+#pragma pack(push, 1)
+typedef struct {
+    uint8_t  version;           // Версия пакета (текущая: 2)
+    double   odo;               // Общий пробег (км)
+    float    trip_a;            // Пробег поездки A (км)
+    float    fuel_trip_a;       // Расход топлива за поездку A (л)
+    float    trip_b;            // Пробег поездки B (км)
+    float    fuel_trip_b;       // Расход топлива за поездку B (л)
+    float    trip_cur;          // Текущий пробег поездки (км)
+    float    fuel_cur;          // Текущий расход поездки (л)
+    float    fuel_level;        // Остаток топлива в баке (л)
+    float    avg_consumption;   // Средний расход за текущую поездку (л/100км)
+    float    avg_total;         // Накопленный средний расход за всё время (л/100км)
+} TripPack;
+#pragma pack(pop)
+
+// =============================================================================
+// KlinePack — K-LINE-телеметрия (публикуется каждые 1000 мс)
+// =============================================================================
+#pragma pack(push, 1)
+typedef struct {
+    uint8_t  version;           // Версия пакета (текущая: 2)
+    float    coolant_temp;      // Температура ОЖ (°C)
+    float    atf_temp;          // Температура масла АКПП (°C)
+    bool     tcc_lockup;        // Блокировка гидротрансформатора
+    uint8_t  selector_position; // Позиция селектора АКПП (0=P, 1=R, 2=N, 3=D...)
+    uint8_t  current_gear;      // Текущая передача (1..6, 0=нейтраль)
+    float    voltage;           // Напряжение бортсети от ЭБУ (В)
+    float    fuel_percent;      // Уровень топлива (%)
+    float    output_shaft_rpm;  // Обороты выходного вала АКПП
+    uint8_t  dtc_count;         // Количество кодов ошибок
+    char     dtc_codes[64];     // Коды ошибок через ';'
+} KlinePack;
+#pragma pack(pop)
+
+// =============================================================================
+// ClimatePack — КЛИМАТ-телеметрия (публикуется каждые 1000 мс)
+// =============================================================================
+#pragma pack(push, 1)
+typedef struct {
+    uint8_t  version;           // Версия пакета (текущая: 1)
+    float    interior_temp;     // Температура в салоне (°C)
+    float    exterior_temp;     // Температура за бортом (°C)
+    bool     tire_pressure;     // Низкое давление в шинах
+    bool     washer_level;      // Низкий уровень омывайки
+} ClimatePack;
+#pragma pack(pop)
+
+// =============================================================================
+// SettingsPack — Настройки (публикуется при старте и при изменении)
+// =============================================================================
+#pragma pack(push, 1)
+typedef struct {
+    uint8_t  version;           // Версия пакета (текущая: 1)
+    float    tank_capacity;     // Ёмкость бака (л, по умолчанию 60.0)
+    uint8_t  injector_count;    // Количество форсунок (по умолчанию 4)
+    float    injector_flow;     // Производительность форсунки (мл/мин, по умолчанию 250.0)
+    float    pulses_per_meter;  // Импульсов датчика скорости на 1 метр
+    uint8_t  kline_protocol;    // Протокол K-Line (0=авто)
+} SettingsPack;
+#pragma pack(pop)
+
+#endif // PACKETS_H
+// END src/core/packets.h
+
+
+// START src/main.cpp
+// ======================================================================
+#include <Arduino.h>
+#include "core/logging.h"
+#include "core/message.h"
+#include "router.h"
+#include "modules/protocol.h"
+#include "modules/transport.h"
+#include "modules/storage.h"
+#include "modules/simulator.h"
+#include "modules/calculator.h"
+#include "modules/kline.h"
+#include "modules/climate.h"
+
+Protocol   protocol;
+Transport  transport;
+Storage    storage;
+Simulator  simulator;
+Calculator calculator;
+KLine      kline;
+Climate    climate;
+
+void setup() {
+    Serial.begin(115200);
+    delay(3000);
+    
+    LOG_INFO("MAIN", "=== TripComputer starting ===");
+    LOG_INFO("MAIN", "Chip: %s, Free heap: %d", ESP.getChipModel(), ESP.getFreeHeap());
+    
+    Router& router = Router::instance();
+    
+    // Регистрация — порядок важен для retain-инжекции
+    router.registerModule(&storage,    Topic::STORAGE | Topic::CALCULATOR | Topic::SYSTEM);
+    router.registerModule(&calculator, Topic::SENSOR | Topic::CALCULATOR | Topic::STORAGE | Topic::SYSTEM, true);
+    router.registerModule(&simulator,  Topic::STORAGE | Topic::SYSTEM, true);
+    router.registerModule(&kline,      Topic::SYSTEM);
+    router.registerModule(&climate,    Topic::SYSTEM);
+    router.registerModule(&protocol,   Topic::TRANSPORT | Topic::SENSOR | Topic::CALCULATOR | 
+                                       Topic::KLINE | Topic::SERVICE | Topic::STORAGE | Topic::SYSTEM);
+    router.registerModule(&transport,  Topic::PROTOCOL | Topic::SYSTEM);
+    
+    LOG_INFO("MAIN", "Init modules...");
+    
+    // 1. Storage — загружает NVS, заполняет retain-кэш
+    storage.init();
+    
+    // 2. Calculator — создаёт задачу, получит retain при router.init()
+    calculator.init();
+    
+    // 3. Simulator — создаёт задачу, получит retain при router.init()
+    simulator.init();
+    
+    // 4. KLine — симуляция диагностики
+    kline.init();
+    
+    // 5. Climate — симуляция климата
+    climate.init();
+    
+    // 6. Protocol — обработчик команд и телеметрии
+    protocol.init();
+    
+    // 7. Router — устанавливает send, вливает retain-кэш
+    if (!router.init()) {
+        LOG_ERROR("MAIN", "Router init failed");
+        while (1) { delay(1000); }
+    }
+    
+    // 8. Transport — Bluetooth (запускается последним)
+    transport.init();
+    
+    LOG_INFO("MAIN", "=== System ready ===");
+}
+
+void loop() {
+    delay(1000);
+    
+    static uint32_t lastAlive = 0;
+    if (millis() - lastAlive > 30000) {
+        lastAlive = millis();
+        LOG_INFO("MAIN", "Alive, heap=%d", ESP.getFreeHeap());
+    }
+}
+// END src/main.cpp
+
+
+// START src/modules/calculator.cpp
+// ======================================================================
+/**
+ * @file calculator.cpp
+ * @brief Вычислитель — расчётное ядро бортового компьютера.
+ * 
+ * Алгоритм полностью взят из эталонной прошивки Bluetooth_connect_v2 v6.8.22.
+ * 
+ * Формулы:
+ *   odo_current     = odo_base + current_distance
+ *   trip_a_current  = trip_a_base + current_distance
+ *   fuel_a_current  = fuel_trip_a_base + current_fuel_used
+ *   avg_consumption = (current_fuel_used / current_distance) * 100.0
+ *   fuel_level      = fuel_base - current_fuel_used (если not_fuel)
+ * 
+ * При запуске двигателя: current_distance = 0, current_fuel_used = 0
+ * При остановке двигателя: пересчёт avg_total
+ */
+
+#include "calculator.h"
+#include "core/logging.h"
+#include "core/message.h"
+
+Calculator::Calculator()
+    : Module("Calculator", Topic::SENSOR)  // Принимает EnginePack
+    , odo_base(0)
+    , trip_a_base(0), trip_b_base(0)
+    , fuel_trip_a_base(0), fuel_trip_b_base(0)
+    , fuel_base(60.0f), fuelLoaded(false)
+    , current_distance(0), current_fuel_used(0)
+    , avg_cur(0), avg_total(0)
+    , fuel_level_sensor(0)
+    , engineRunning(false), not_fuel(true)
+    , tank_capacity(60.0f)
+{
+    // Подписываемся на команды управления
+    subscribeCommand(CMD_RESET_TRIP_A);
+    subscribeCommand(CMD_RESET_TRIP_B);
+    subscribeCommand(CMD_RESET_AVG);
+    subscribeCommand(CMD_FULL_TANK);
+    subscribeCommand(CMD_CORRECT_ODO);
+}
+
+bool Calculator::init() {
+    LOG_INFO(name, "Init");
+    
+    // Загружаем начальные base-значения из SettingsPack и TripPack
+    // Они приходят через onData() от Storage (retain)
+    
+    BaseType_t result = xTaskCreatePinnedToCore(
+        taskFunction, "CalcTask", TASK_STACK, this, TASK_PRIO, &taskHandle, TASK_CORE
+    );
+    
+    if (result != pdPASS) {
+        LOG_ERROR(name, "Task create failed");
+        return false;
+    }
+    
+    LOG_INFO(name, "Task created");
+    return true;
+}
+
+void Calculator::onData(const Message& msg) {
+    if (msg.type != MsgType::FULL) return;
+    
+    // EnginePack — от Simulator (или RealEngine)
+    if (msg.full.topic == Topic::SENSOR && msg.full.payloadSize >= sizeof(EnginePack)) {
+        EnginePack p;
+        memcpy(&p, msg.full.payload, sizeof(EnginePack));
+        
+        // Запуск двигателя — сбрасываем накопления
+        if (p.engine_running && !engineRunning) {
+            current_distance = 0;
+            current_fuel_used = 0;
+            avg_cur = 0;
+            LOG_INFO(name, "Engine started, trip counters reset");
+        }
+        
+        // Остановка двигателя — пересчитываем avg_total
+        if (!p.engine_running && engineRunning) {
+            if (avg_total == 0.0f || avg_cur == 0.0f) {
+                avg_total = avg_cur;
+            } else {
+                avg_total = (avg_total + avg_cur) / 2.0f;
+            }
+            LOG_INFO(name, "Engine stopped, avg_total=%.1f", avg_total);
+        }
+        
+        engineRunning = p.engine_running;
+        current_distance = p.distance;
+        current_fuel_used = p.fuel_used;
+        fuel_level_sensor = p.fuel_level_sensor;
+        not_fuel = p.not_fuel;
+    }
+    
+    // TripPack — от Storage (base-значения при старте)
+    if (msg.full.topic == Topic::CALCULATOR && msg.full.payloadSize >= sizeof(TripPack)) {
+        TripPack p;
+        memcpy(&p, msg.full.payload, sizeof(TripPack));
+        
+        // Берём base-значения только если двигатель НЕ запущен и odo_base ещё не установлен
+        if (odo_base == 0.0 && p.odo > 0.01 && !engineRunning) {
+            odo_base = p.odo;
+            trip_a_base = p.trip_a;
+            trip_b_base = p.trip_b;
+            fuel_trip_a_base = p.fuel_trip_a;
+            fuel_trip_b_base = p.fuel_trip_b;
+            
+            if (p.avg_total > 0.0f) {
+                avg_total = p.avg_total;
+            }
+            
+            LOG_INFO(name, "Loaded from NVS: ODO=%.0f, tripA=%.1f, tripB=%.1f",
+                     odo_base, trip_a_base, trip_b_base);
+        }
+        
+        // fuel_level из NVS — всегда берём
+        if (!fuelLoaded && p.fuel_level > 0.01f) {
+            fuelLoaded = true;
+            fuel_base = p.fuel_level;
+            LOG_INFO(name, "Fuel level loaded from NVS: %.1f L", fuel_base);
+        }
+    }
+    
+    // SettingsPack — от Storage (настройки)
+    if (msg.full.topic == Topic::STORAGE && msg.full.payloadSize >= sizeof(SettingsPack)) {
+        SettingsPack p;
+        memcpy(&p, msg.full.payload, sizeof(SettingsPack));
+        
+        float oldTank = tank_capacity;
+        tank_capacity = p.tank_capacity;
+        
+        if (oldTank != tank_capacity && fuel_base > tank_capacity) {
+            fuel_base = tank_capacity;
+            LOG_INFO(name, "Tank capacity changed: %.1f -> %.1f", oldTank, tank_capacity);
+        }
+    }
+}
+
+void Calculator::onCommand(uint8_t cmd, const Message& msg) {
+    switch (cmd) {
+        case CMD_RESET_TRIP_A:
+            trip_a_base = -current_distance;
+            fuel_trip_a_base = -current_fuel_used;
+            LOG_INFO(name, "Trip A reset");
+            break;
+            
+        case CMD_RESET_TRIP_B:
+            trip_b_base = -current_distance;
+            fuel_trip_b_base = -current_fuel_used;
+            LOG_INFO(name, "Trip B reset");
+            break;
+            
+        case CMD_RESET_AVG:
+            current_distance = 0;
+            current_fuel_used = 0;
+            avg_cur = 0;
+            LOG_INFO(name, "Avg consumption reset");
+            break;
+            
+        case CMD_FULL_TANK:
+            fuel_base = tank_capacity;
+            current_fuel_used = 0;
+            LOG_INFO(name, "Full tank: %.1f L", fuel_base);
+            break;
+            
+        case CMD_CORRECT_ODO: {
+            // payload содержит новое значение odo (uint64_t из Message::value)
+            uint64_t newOdo = msg.fast.value;
+            odo_base = (double)newOdo;
+            LOG_INFO(name, "ODO corrected: %.0f km", odo_base);
+            break;
+        }
+    }
+}
+
+void Calculator::taskFunction(void* param) {
+    static_cast<Calculator*>(param)->run();
+}
+
+void Calculator::run() {
+    LOG_INFO(name, "Task started");
+    
+    unsigned long lastPublish = 0;
+    const unsigned long PUBLISH_INTERVAL = 1000;  // 1 Гц
+    
+    while (true) {
+        unsigned long now = millis();
+        
+        // Публикация TripPack каждую секунду
+        if (now - lastPublish >= PUBLISH_INTERVAL) {
+            lastPublish = now;
+            
+            TripPack pack;
+            memset(&pack, 0, sizeof(pack));
+            pack.version      = 2;
+            pack.odo          = odo_base + current_distance;
+            pack.trip_a       = trip_a_base + current_distance;
+            pack.fuel_trip_a  = fuel_trip_a_base + current_fuel_used;
+            pack.trip_b       = trip_b_base + current_distance;
+            pack.fuel_trip_b  = fuel_trip_b_base + current_fuel_used;
+            pack.trip_cur     = current_distance;
+            pack.fuel_cur     = current_fuel_used;
+            
+            // Топливо: от датчика ИЛИ расчётное
+            if (not_fuel) {
+                pack.fuel_level = max(0.0f, fuel_base - current_fuel_used);
+            } else {
+                pack.fuel_level = fuel_level_sensor;
+            }
+            
+            // Средний расход
+            pack.avg_consumption = (current_distance > 0.001f) 
+                ? (current_fuel_used / current_distance) * 100.0f 
+                : 0.0f;
+            avg_cur = pack.avg_consumption;
+            pack.avg_total = avg_total;
+            
+            if (send) {
+                Message msg = Message::createFull(Topic::CALCULATOR, CMD_NONE,
+                                                   (const uint8_t*)&pack, sizeof(TripPack));
+                send(msg);
+            }
+        }
+        
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+}
+// END src/modules/calculator.cpp
+
+
+// START src/modules/calculator.h
+// ======================================================================
+#ifndef CALCULATOR_H
+#define CALCULATOR_H
+
+#include "core/module.h"
+#include "core/packets.h"
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+
+class Calculator : public Module {
+public:
+    Calculator();
+    
+    bool init() override;
+    void onData(const Message& msg) override;
+    void onCommand(uint8_t cmd, const Message& msg) override;
+    
+private:
+    static void taskFunction(void* param);
+    void run();
+    
+    TaskHandle_t taskHandle;
+    
+    // Base-значения (от Storage, не меняются до команд)
+    double odo_base;
+    float  trip_a_base;
+    float  trip_b_base;
+    float  fuel_trip_a_base;
+    float  fuel_trip_b_base;
+    float  fuel_base;
+    bool   fuelLoaded;
+    
+    // Накопленные за поездку (сбрасываются при запуске/остановке двигателя)
+    float  current_distance;
+    float  current_fuel_used;
+    
+    // Средний расход
+    float  avg_cur;      // Текущая поездка
+    float  avg_total;    // Накопленный за всё время
+    
+    // Топливо от датчика
+    float  fuel_level_sensor;
+    
+    // Статусы
+    bool   engineRunning;
+    bool   not_fuel;     // true = датчика топлива нет, считаем сами
+    
+    // Настройки
+    float  tank_capacity;
+    
+    // Параметры задачи
+    static constexpr uint32_t     TASK_STACK = 3072;
+    static constexpr UBaseType_t  TASK_PRIO  = 2;
+    static constexpr BaseType_t   TASK_CORE  = 0;
+};
+
+#endif
+// END src/modules/calculator.h
+
+
+// START src/modules/climate.cpp
+// ======================================================================
+#include "climate.h"
+#include "core/logging.h"
+#include "core/message.h"
+
+Climate::Climate()
+    : Module("Climate", 0)
+{}
+
+bool Climate::init() {
+    LOG_INFO(name, "Init (simulation)");
+    
+    memset(&pack, 0, sizeof(pack));
+    pack.version = 1;
+    pack.interior_temp = 22.0f;
+    pack.exterior_temp = 15.0f;
+    
+    BaseType_t result = xTaskCreatePinnedToCore(
+        taskFunction, "ClimTask", TASK_STACK, this, TASK_PRIO, &taskHandle, TASK_CORE
+    );
+    
+    if (result != pdPASS) {
+        LOG_ERROR(name, "Task create failed");
+        return false;
+    }
+    
+    LOG_INFO(name, "Task created");
+    return true;
+}
+
+void Climate::taskFunction(void* param) {
+    static_cast<Climate*>(param)->run();
+}
+
+void Climate::run() {
+    LOG_INFO(name, "Task started");
+    
+    unsigned long lastPublish = 0;
+    
+    while (true) {
+        unsigned long now = millis();
+        
+        if (now - lastPublish >= 1000) {
+            lastPublish = now;
+            
+            pack.interior_temp = 20.0f + (random(0, 50) / 10.0f);
+            pack.exterior_temp = 10.0f + (random(0, 80) / 10.0f);
+            pack.tire_pressure = (random(0, 100) < 5);
+            pack.washer_level = (random(0, 100) < 3);
+            
+            if (send) {
+                Message msg = Message::createFull(Topic::SERVICE, CMD_NONE,
+                                                   (const uint8_t*)&pack, sizeof(ClimatePack));
+                send(msg);
+            }
+        }
+        
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+}
+// END src/modules/climate.cpp
+
+
+// START src/modules/climate.h
+// ======================================================================
+#ifndef CLIMATE_H
+#define CLIMATE_H
+
+#include "core/module.h"
+#include "core/packets.h"
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+
+class Climate : public Module {
+public:
+    Climate();
+    bool init() override;
+    
+private:
+    static void taskFunction(void* param);
+    void run();
+    TaskHandle_t taskHandle;
+    ClimatePack pack;
+    
+    static constexpr uint32_t TASK_STACK = 2048;
+    static constexpr UBaseType_t TASK_PRIO = 1;
+    static constexpr BaseType_t TASK_CORE = 1;
+};
+
+#endif
+// END src/modules/climate.h
+
+
+// START src/modules/kline.cpp
+// ======================================================================
+#include "kline.h"
+#include "core/logging.h"
+#include "core/message.h"
+
+KLine::KLine()
+    : Module("KLine", 0)
+{
+    subscribeCommand(CMD_KL_GET_DTC);
+    subscribeCommand(CMD_KL_CLEAR_DTC);
+    subscribeCommand(CMD_KL_RESET_ADAPT);
+    subscribeCommand(CMD_KL_PUMP_ATF);
+    subscribeCommand(CMD_KL_DETECT_PROTO);
+}
+
+bool KLine::init() {
+    LOG_INFO(name, "Init (simulation)");
+    
+    memset(&pack, 0, sizeof(pack));
+    pack.version = 2;
+    pack.coolant_temp = 90.0f;
+    pack.atf_temp = 75.0f;
+    pack.selector_position = 3;  // D
+    pack.current_gear = 2;
+    strcpy(pack.dtc_codes, "P0135;P0141");
+    
+    BaseType_t result = xTaskCreatePinnedToCore(
+        taskFunction, "KLineTask", TASK_STACK, this, TASK_PRIO, &taskHandle, TASK_CORE
+    );
+    
+    if (result != pdPASS) {
+        LOG_ERROR(name, "Task create failed");
+        return false;
+    }
+    
+    LOG_INFO(name, "Task created");
+    return true;
+}
+
+void KLine::onCommand(uint8_t cmd, const Message& msg) {
+    switch (cmd) {
+        case CMD_KL_GET_DTC:
+            LOG_INFO(name, "DTC request");
+            break;
+        case CMD_KL_CLEAR_DTC:
+            memset(pack.dtc_codes, 0, sizeof(pack.dtc_codes));
+            LOG_INFO(name, "DTC cleared");
+            break;
+        case CMD_KL_RESET_ADAPT:
+            LOG_INFO(name, "TCM adaptation reset");
+            break;
+        case CMD_KL_PUMP_ATF:
+            LOG_INFO(name, "ATF pump");
+            break;
+        case CMD_KL_DETECT_PROTO:
+            LOG_INFO(name, "Protocol detection");
+            break;
+    }
+}
+
+void KLine::taskFunction(void* param) {
+    static_cast<KLine*>(param)->run();
+}
+
+void KLine::run() {
+    LOG_INFO(name, "Task started");
+    
+    unsigned long lastPublish = 0;
+    
+    while (true) {
+        unsigned long now = millis();
+        
+        if (now - lastPublish >= 1000) {
+            lastPublish = now;
+            
+            // Simulate varying values
+            pack.coolant_temp = 85.0f + (random(0, 20) / 10.0f);
+            pack.atf_temp = 70.0f + (random(0, 15) / 10.0f);
+            pack.voltage = 14.0f + (random(0, 50) / 100.0f);
+            pack.fuel_percent = 55.0f + (random(0, 20) / 10.0f);
+            pack.output_shaft_rpm = 1500.0f + random(0, 500);
+            
+            if (send) {
+                Message msg = Message::createFull(Topic::KLINE, CMD_NONE,
+                                                   (const uint8_t*)&pack, sizeof(KlinePack));
+                send(msg);
+            }
+        }
+        
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+}
+// END src/modules/kline.cpp
+
+
+// START src/modules/kline.h
+// ======================================================================
+#ifndef KLINE_H
+#define KLINE_H
+
+#include "core/module.h"
+#include "core/packets.h"
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+
+class KLine : public Module {
+public:
+    KLine();
+    bool init() override;
+    void onCommand(uint8_t cmd, const Message& msg) override;
+    
+private:
+    static void taskFunction(void* param);
+    void run();
+    TaskHandle_t taskHandle;
+    KlinePack pack;
+    
+    static constexpr uint32_t TASK_STACK = 3072;
+    static constexpr UBaseType_t TASK_PRIO = 1;
+    static constexpr BaseType_t TASK_CORE = 1;
+};
+
+#endif
+// END src/modules/kline.h
+
+
+// START src/modules/protocol.cpp
+// ======================================================================
+#include "protocol.h"
+#include "core/logging.h"
+#include "core/message.h"
+
+// ------------ Таблица команд ------------
+struct CommandMap {
+    const char* str;
+    uint8_t cmd;
+    bool hasPayload;
+};
+
+static const CommandMap COMMAND_TABLE[] = {
+    {"reset_trip_a",            CMD_RESET_TRIP_A,       true},
+    {"reset_trip_b",            CMD_RESET_TRIP_B,       true},
+    {"reset_avg",               CMD_RESET_AVG,          true},
+    {"full_tank",               CMD_FULL_TANK,          true},
+    {"correct_odo",             CMD_CORRECT_ODO,        true},
+    {"kl_get_dtc",              CMD_KL_GET_DTC,         true},
+    {"kl_clear_dtc",            CMD_KL_CLEAR_DTC,       true},
+    {"kl_reset_adapt",          CMD_KL_RESET_ADAPT,     true},
+    {"kl_pump_atf",             CMD_KL_PUMP_ATF,        true},
+    {"kl_detect_protocol",      CMD_KL_DETECT_PROTO,    true},
+    {"calibrate_speed",         CMD_CALIBRATE_SPEED,    true},
+    {"calibrate_injector",      CMD_CALIBRATE_INJECTOR, true},
+    {"calibrate_deadtime",      CMD_CALIBRATE_DEADTIME, true},
+    {"ota_start",               CMD_OTA_START,          true},
+    {"ota_end",                 CMD_OTA_END,            true},
+    {"get_cfg",                 CMD_GET_CFG,            false},
+    {"set_cfg",                 CMD_SET_CFG,            false},
+    {"start_telemetry",         CMD_NONE,               false},
+    {"stop_telemetry",          CMD_NONE,               false},
+    {"ping",                    CMD_NONE,               false},
+    {"ota_update",              CMD_NONE,               false},
+    {"ota_data",                CMD_NONE,               false},
+    {"calibrate_speed_start",   CMD_NONE,               false},
+    {"calibrate_speed_end",     CMD_NONE,               false},
+};
+
+static uint8_t findCommand(const char* str) {
+    if (!str) return CMD_NONE;
+    for (const auto& item : COMMAND_TABLE) {
+        if (strcmp(str, item.str) == 0) return item.cmd;
+    }
+    return CMD_NONE;
+}
+
+static bool cmdHasPayload(const char* str) {
+    if (!str) return false;
+    for (const auto& item : COMMAND_TABLE) {
+        if (strcmp(str, item.str) == 0) return item.hasPayload;
+    }
+    return false;
+}
+
+// ------------ Protocol ------------
+
+Protocol::Protocol()
+    : Module("Protocol", Topic::TRANSPORT | Topic::SENSOR | Topic::CALCULATOR | 
+                         Topic::KLINE | Topic::SERVICE | Topic::STORAGE)
+    , telemetryActive(false)
+    , transportConnected(false)
+    , lastTelemetryMs(0)
+    , telemetryCounter(0)
+    , engineValid(false), tripValid(false), klineValid(false), climateValid(false), settingsValid(false)
+{
+    subscribeCommand(CMD_TRANSPORT_STATUS);
+}
+
+bool Protocol::init() {
+    LOG_INFO(name, "Init");
+    jsonLen = 0;
+    memset(jsonBuffer, 0, JSON_BUF_SIZE);
+    memset(&engineCache, 0, sizeof(engineCache));
+    memset(&tripCache, 0, sizeof(tripCache));
+    memset(&klineCache, 0, sizeof(klineCache));
+    memset(&climateCache, 0, sizeof(climateCache));
+    memset(&settingsCache, 0, sizeof(settingsCache));
+    return true;
+}
+
+void Protocol::onMessage(const Message& msg) {
+    // Входящий JSON от Transport — особая обработка (сборка строки)
+    if (msg.type == MsgType::FULL && msg.full.topic == Topic::TRANSPORT) {
+        processIncomingData(msg.full.payload, msg.full.payloadSize);
+        return;
+    }
+    
+    // Всё остальное — через базовый onMessage → onCommand / onData
+    Module::onMessage(msg);
+}
+
+void Protocol::onData(const Message& msg) {
+    if (msg.type != MsgType::FULL) return;
+    uint16_t topic = msg.full.topic;
+    const uint8_t* data = msg.full.payload;
+    uint16_t size = msg.full.payloadSize;
+    
+    if (topic == Topic::SENSOR && size >= sizeof(EnginePack)) {
+        memcpy(&engineCache, data, sizeof(EnginePack));
+        engineValid = true;
+    }
+    else if (topic == Topic::CALCULATOR && size >= sizeof(TripPack)) {
+        memcpy(&tripCache, data, sizeof(TripPack));
+        tripValid = true;
+    }
+    else if (topic == Topic::KLINE && size >= sizeof(KlinePack)) {
+        memcpy(&klineCache, data, sizeof(KlinePack));
+        klineValid = true;
+    }
+    else if (topic == Topic::SERVICE && size >= sizeof(ClimatePack)) {
+        memcpy(&climateCache, data, sizeof(ClimatePack));
+        climateValid = true;
+    }
+    else if (topic == Topic::STORAGE && size >= sizeof(SettingsPack)) {
+        memcpy(&settingsCache, data, sizeof(SettingsPack));
+        settingsValid = true;
+    }
+}
+
+void Protocol::onCommand(uint8_t cmd, const Message& msg) {
+    if (cmd == CMD_TRANSPORT_STATUS) {
+        transportConnected = (msg.fast.value != 0);
+        LOG_INFO(name, "Transport %s", transportConnected ? "ONLINE" : "OFFLINE");
+    }
+}
+
+void Protocol::tick() {
+    if (!telemetryActive) return;
+    if (!transportConnected) return;
+    
+    unsigned long now = millis();
+    if (now - lastTelemetryMs < 100) return;
+    lastTelemetryMs = now;
+    telemetryCounter++;
+    
+    buildFastJson();
+    
+    if (telemetryCounter % 5 == 0) {
+        addTripFields();
+    }
+    if (telemetryCounter % 10 == 0) {
+        addServiceFields();
+    }
+    
+    sendJson();
+}
+
+// ------------ Парсинг входящего JSON ------------
+
+void Protocol::processIncomingData(const uint8_t* data, uint16_t size) {
+    if (jsonLen + size >= JSON_BUF_SIZE) {
+        LOG_ERROR(name, "Buffer overflow");
+        jsonLen = 0;
+        return;
+    }
+    memcpy(jsonBuffer + jsonLen, data, size);
+    jsonLen += size;
+    jsonBuffer[jsonLen] = '\0';
+    
+    if (jsonBuffer[jsonLen - 1] == '}') {
+        LOG_INFO(name, "Incoming: %s", jsonBuffer);
+        parseJson(jsonBuffer);
+        jsonLen = 0;
+    }
+}
+
+void Protocol::parseJson(const char* json) {
+    jsonInDoc.clear();
+    DeserializationError err = deserializeJson(jsonInDoc, json);
+    
+    if (err) {
+        LOG_ERROR(name, "JSON parse error: %s", err.c_str());
+        sendAck(0);
+        return;
+    }
+    
+    const char* cmdStr = jsonInDoc["command"];
+    if (!cmdStr) cmdStr = jsonInDoc["cmd"];
+    int msgId = jsonInDoc["msg_id"] | 0;
+    
+    if (!cmdStr) { sendAck(msgId); return; }
+    
+    LOG_INFO(name, "Cmd: '%s', id=%d", cmdStr, msgId);
+    
+    // Специальные команды (обрабатываются здесь, не в шину)
+    if (strcmp(cmdStr, "get_cfg") == 0) {
+        sendAck(msgId);
+        if (send) send(Message::createFull(Topic::STORAGE, CMD_GET_CFG,
+                                            (const uint8_t*)&msgId, sizeof(msgId)));
+        return;
+    }
+    if (strcmp(cmdStr, "set_cfg") == 0) {
+        sendAck(msgId);
+        if (send) send(Message::createFull(Topic::STORAGE, CMD_SET_CFG,
+                                            (const uint8_t*)json, strlen(json)));
+        return;
+    }
+    if (strcmp(cmdStr, "start_telemetry") == 0) {
+        handleStartTelemetry(msgId);
+        return;
+    }
+    if (strcmp(cmdStr, "stop_telemetry") == 0) {
+        handleStopTelemetry(msgId);
+        return;
+    }
+    if (strcmp(cmdStr, "ping") == 0) {
+        sendAck(msgId);
+        return;
+    }
+    if (strcmp(cmdStr, "calibrate_speed_start") == 0) {
+        if (send) send(Message::createFast(Topic::ENGINE, CMD_CALIBRATE_SPEED, 0));
+        sendAck(msgId);
+        return;
+    }
+    if (strcmp(cmdStr, "calibrate_speed_end") == 0) {
+        int dist = jsonInDoc["distance_m"] | 0;
+        if (dist > 0 && send)
+            send(Message::createFast(Topic::ENGINE, CMD_CALIBRATE_SPEED, dist));
+        sendAck(msgId);
+        return;
+    }
+    if (strcmp(cmdStr, "correct_odo") == 0) {
+        int odo = jsonInDoc["odo"] | 0;
+        if (send) send(Message::createFast(Topic::CALCULATOR, CMD_CORRECT_ODO, odo));
+        sendAck(msgId);
+        return;
+    }
+    if (strcmp(cmdStr, "ota_update") == 0) {
+        LOG_INFO(name, "OTA update (not implemented)");
+        sendAck(msgId);
+        return;
+    }
+    if (strcmp(cmdStr, "ota_data") == 0) {
+        sendAck(msgId);
+        return;
+    }
+    
+    // Команды в шину
+    uint8_t cmd = findCommand(cmdStr);
+    if (cmd != CMD_NONE && cmdHasPayload(cmdStr)) {
+        uint16_t topic = 0;
+        if (cmd >= CMD_RESET_TRIP_A && cmd <= CMD_CORRECT_ODO)       topic = Topic::CALCULATOR;
+        else if (cmd >= CMD_KL_GET_DTC && cmd <= CMD_KL_DETECT_PROTO) topic = Topic::KLINE;
+        else if (cmd >= CMD_CALIBRATE_SPEED && cmd <= CMD_CALIBRATE_DEADTIME) topic = Topic::ENGINE;
+        else if (cmd == CMD_OTA_START || cmd == CMD_OTA_END)          topic = Topic::OTA;
+        
+        if (topic && send) send(Message::createFast(topic, cmd, 0));
+    }
+    
+    sendAck(msgId);
+}
+
+// ------------ Обработчики ------------
+
+void Protocol::handleStartTelemetry(int msgId) {
+    telemetryActive = true;
+    telemetryCounter = 0;
+    lastTelemetryMs = 0;
+    LOG_INFO(name, "Telemetry STARTED");
+    sendAck(msgId);
+}
+
+void Protocol::handleStopTelemetry(int msgId) {
+    telemetryActive = false;
+    LOG_INFO(name, "Telemetry STOPPED");
+    sendAck(msgId);
+}
+
+// ------------ Телеметрия ------------
+
+void Protocol::buildFastJson() {
+    jsonOutDoc.clear();
+    JsonObject tel = jsonOutDoc["tel"].to<JsonObject>();
+    tel["spd"]  = (int)(engineValid ? engineCache.speed : 0);
+    tel["rpm"]  = (int)(engineValid ? engineCache.rpm : 0);
+    tel["vlt"]  = roundf((engineValid ? engineCache.voltage : 0.0f) * 10) / 10;
+    tel["eng"]  = (int)(engineValid ? engineCache.engine_running : 0);
+    tel["hl"]   = (int)(engineValid ? engineCache.parking_lights : 0);
+    
+    const char* selStr[] = {"P", "R", "N", "D", "3", "2", "L"};
+    const char* base = (klineValid && klineCache.selector_position <= 6) 
+                        ? selStr[klineCache.selector_position] : "D";
+    char selBuf[8];
+    if (klineValid && klineCache.current_gear > 0 && klineCache.selector_position == 3)
+        snprintf(selBuf, sizeof(selBuf), "%s%d", base, klineCache.current_gear);
+    else
+        snprintf(selBuf, sizeof(selBuf), "%s", base);
+    tel["sel"]  = selBuf;
+    tel["tcc"]  = (int)(klineValid ? klineCache.tcc_lockup : 0);
+    tel["fuel"] = roundf((engineValid ? engineCache.fuel_level_sensor : 0.0f) * 10) / 10;
+}
+
+void Protocol::addTripFields() {
+    if (!tripValid) return;
+    JsonObject tel = jsonOutDoc["tel"];
+    tel["odo"] = (int)tripCache.odo;
+    tel["trip_a"] = roundf(tripCache.trip_a * 10) / 10;
+    tel["fuel_a"] = roundf(tripCache.fuel_trip_a * 10) / 10;
+    tel["trip_b"] = roundf(tripCache.trip_b * 10) / 10;
+    tel["fuel_b"] = roundf(tripCache.fuel_trip_b * 10) / 10;
+    tel["trip_cur"] = roundf(tripCache.trip_cur * 10) / 10;
+    tel["fuel_cur"] = roundf(tripCache.fuel_cur * 10) / 10;
+    tel["inst"] = roundf((engineValid ? engineCache.instant_fuel : 0.0f) * 10) / 10;
+    tel["avg_cur"] = roundf(tripCache.avg_consumption * 10) / 10;
+    float avg = (tripCache.avg_total > 0.0f) ? tripCache.avg_total : tripCache.avg_consumption;
+    tel["avg"] = roundf(avg * 10) / 10;
+}
+
+void Protocol::addServiceFields() {
+    JsonObject tel = jsonOutDoc["tel"];
+    if (klineValid) {
+        tel["t_cool"] = roundf(klineCache.coolant_temp * 10) / 10;
+        tel["t_atf"] = roundf(klineCache.atf_temp * 10) / 10;
+        tel["dtc"] = klineCache.dtc_codes;
+    }
+    if (climateValid) {
+        tel["t_int"] = roundf(climateCache.interior_temp * 10) / 10;
+        tel["t_ext"] = roundf(climateCache.exterior_temp * 10) / 10;
+        tel["tire"] = (int)climateCache.tire_pressure;
+        tel["wash"] = (int)climateCache.washer_level;
+    }
+}
+
+// ------------ ACK и отправка ------------
+
+void Protocol::sendAck(int msgId) {
+    jsonOutDoc.clear();
+    jsonOutDoc["ack_id"] = msgId;
+    sendJson();
+}
+
+void Protocol::sendJson() {
+    if (!send) return;
+    char buf[JSON_BUF_SIZE];
+    size_t len = serializeJson(jsonOutDoc, buf, sizeof(buf));
+    Message msg = Message::createFull(Topic::PROTOCOL, CMD_NONE, (const uint8_t*)buf, len);
+    send(msg);
+}
+// END src/modules/protocol.cpp
+
+
+// START src/modules/protocol.h
+// ======================================================================
+#ifndef PROTOCOL_H
+#define PROTOCOL_H
+
+#include "core/module.h"
+#include "core/packets.h"
+
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#include <ArduinoJson.h>
+#pragma GCC diagnostic pop
+
+class Protocol : public Module {
+public:
+    Protocol();
+    
+    bool init() override;
+    void onMessage(const Message& msg) override;
+    void onData(const Message& msg) override;
+    void onCommand(uint8_t cmd, const Message& msg) override;
+    void tick() override;
+    
+private:
+    static constexpr size_t JSON_BUF_SIZE = 512;
+    char jsonBuffer[JSON_BUF_SIZE];
+    uint16_t jsonLen;
+    
+    #pragma GCC diagnostic push
+    #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+    StaticJsonDocument<512> jsonInDoc;
+    StaticJsonDocument<512> jsonOutDoc;
+    #pragma GCC diagnostic pop
+    
+    bool telemetryActive;
+    bool transportConnected;
+    unsigned long lastTelemetryMs;
+    int telemetryCounter;
+    
+    EnginePack  engineCache;
+    TripPack    tripCache;
+    KlinePack   klineCache;
+    ClimatePack climateCache;
+    SettingsPack settingsCache;
+    
+    bool engineValid, tripValid, klineValid, climateValid, settingsValid;
+    
+    void processIncomingData(const uint8_t* data, uint16_t size);
+    void parseJson(const char* json);
+    
+    void handleStartTelemetry(int msgId);
+    void handleStopTelemetry(int msgId);
+    
+    void buildFastJson();
+    void addTripFields();
+    void addServiceFields();
+    void sendAck(int msgId);
+    void sendJson();
+};
+
+#endif
+// END src/modules/protocol.h
+
+
+// START src/modules/simulator.cpp
+// ======================================================================
+#include "simulator.h"
+#include "core/logging.h"
+#include "core/message.h"
+
+Simulator::Simulator()
+    : Module("Simulator", Topic::STORAGE)
+    , engineRunning(false), speed(0), rpm(0), distance(0)
+    , fuelUsed(0), fuelBase(60.0f), lastPublish(0), logCounter(0)
+{
+    subscribeCommand(CMD_FULL_TANK);
+}
+
+bool Simulator::init() {
+    LOG_INFO(name, "Init");
+    
+    memset(&pack, 0, sizeof(pack));
+    pack.version = 3;
+    pack.voltage = 12.7f;
+    pack.not_fuel = true;
+    
+    BaseType_t result = xTaskCreatePinnedToCore(
+        taskFunction, "SimTask", TASK_STACK, this, TASK_PRIO, &taskHandle, TASK_CORE
+    );
+    
+    if (result != pdPASS) {
+        LOG_ERROR(name, "Task create failed");
+        return false;
+    }
+    
+    LOG_INFO(name, "Task created");
+    return true;
+}
+
+void Simulator::onData(const Message& msg) {
+    if (msg.type != MsgType::FULL) return;
+    
+    if (msg.full.topic == Topic::STORAGE && msg.full.payloadSize >= sizeof(SettingsPack)) {
+        SettingsPack p;
+        memcpy(&p, msg.full.payload, sizeof(SettingsPack));
+        fuelBase = p.tank_capacity;
+        LOG_INFO(name, "Tank from Storage: %.1f", fuelBase);
+    }
+}
+
+void Simulator::onCommand(uint8_t cmd, const Message& msg) {
+    if (cmd == CMD_FULL_TANK) {
+        fuelBase = fuelBase;  // сохраняем текущий объём (он уже из SettingsPack)
+        fuelUsed = 0;
+        LOG_INFO(name, "Full tank: %.1f L", fuelBase);
+    }
+}
+
+void Simulator::taskFunction(void* param) {
+    static_cast<Simulator*>(param)->run();
+}
+
+void Simulator::run() {
+    LOG_INFO(name, "Task started");
+    
+    while (true) {
+        unsigned long now = millis();
+        
+        engineRunning = true;
+        
+        static float delta = 0.5f;
+        speed += delta;
+        if (speed >= 100.0f || speed <= 0.0f) delta = -delta;
+        speed = constrain(speed, 0.0f, 100.0f);
+        
+        rpm = engineRunning ? (750.0f + speed * 50.0f) : 0.0f;
+        pack.voltage = engineRunning ? (13.5f + (random(0, 100) / 100.0f)) : 12.7f;
+        
+        float dt_hours = 0.05f / 3600.0f;
+        float dist_km = speed * dt_hours;
+        distance += dist_km;
+        float instantLph = (speed > 5.0f) ? (5.0f + speed / 10.0f) : 0.0f;
+        fuelUsed += (instantLph * dist_km) / 100.0f;
+        
+        if (now - lastPublish >= 100) {
+            lastPublish = now;
+            
+            pack.speed = speed;
+            pack.rpm = rpm;
+            pack.engine_running = engineRunning;
+            pack.parking_lights = false;
+            pack.instant_fuel = instantLph;
+            pack.distance = distance;
+            pack.fuel_used = fuelUsed;
+            pack.fuel_level_sensor = max(0.0f, fuelBase - fuelUsed);
+            
+            logCounter++;
+            if (logCounter % 20 == 0) {
+                LOG_DEBUG(name, "Pub #%d: spd=%.1f, rpm=%.0f, fuel=%.1f", 
+                          logCounter, pack.speed, pack.rpm, pack.fuel_level_sensor);
+            }
+            
+            if (send) {
+                Message msg = Message::createFull(
+                    Topic::SENSOR, CMD_NONE,
+                    (const uint8_t*)&pack, sizeof(EnginePack)
+                );
+                send(msg);
+            }
+        }
+        
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+}
+// END src/modules/simulator.cpp
+
+
+// START src/modules/simulator.h
+// ======================================================================
+#ifndef SIMULATOR_H
+#define SIMULATOR_H
+
+#include "core/module.h"
+#include "core/packets.h"
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+
+class Simulator : public Module {
+public:
+    Simulator();
+    
+    bool init() override;
+    void onData(const Message& msg) override;
+    void onCommand(uint8_t cmd, const Message& msg) override;
+    void tick() override {};
+    
+private:
+    static void taskFunction(void* param);
+    void run();
+    
+    TaskHandle_t taskHandle;
+    EnginePack pack;
+    
+    bool engineRunning;
+    float speed;
+    float rpm;
+    float distance;
+    float fuelUsed;
+    float fuelBase;
+    unsigned long lastPublish;
+    int logCounter;
+    
+    static constexpr uint32_t TASK_STACK = 3072;
+    static constexpr UBaseType_t TASK_PRIO = 2;
+    static constexpr BaseType_t TASK_CORE = 0;
+};
+
+#endif
+// END src/modules/simulator.h
+
+
+// START src/modules/storage.cpp
+// ======================================================================
+/**
+ * @file storage.cpp
+ * @brief Хранитель настроек и данных между сеансами (NVS).
+ */
+
+#include "storage.h"
+#include "core/logging.h"
+#include "core/message.h"
+#include "router.h"
+#include <math.h>
+
+Storage::Storage()
+    : Module("Storage", Topic::STORAGE)
+    , tripValid(false), settingsValid(false)
+    , tripDirty(false), settingsDirty(false)
+    , lastTripSaveMs(0), lastSettingsSaveMs(0)
+{}
+
+bool Storage::init() {
+    LOG_INFO(name, "Init");
+    
+    // Загружаем из NVS и публикуем в retain-кэш Router'а
+    loadAndPublish();
+    
+    // Создаём задачу для асинхронного сохранения
+    BaseType_t result = xTaskCreatePinnedToCore(
+        taskFunction, "StorTask", TASK_STACK, this, TASK_PRIO, &taskHandle, TASK_CORE
+    );
+    
+    if (result != pdPASS) {
+        LOG_ERROR(name, "Task create failed");
+        return false;
+    }
+    
+    LOG_INFO(name, "Task created");
+    return true;
+}
+
+void Storage::onMessage(const Message& msg) {
+    // Команды
+    if (msg.type == MsgType::FULL && msg.full.topic == Topic::STORAGE) {
+        if (msg.full.cmd == CMD_GET_CFG) {
+            int msgId = 0;
+            if (msg.full.payloadSize >= sizeof(msgId))
+                memcpy(&msgId, msg.full.payload, sizeof(msgId));
+            handleGetCfg(msgId);
+        }
+        else if (msg.full.cmd == CMD_SET_CFG) {
+            handleSetCfg((const char*)msg.full.payload);
+        }
+        return;
+    }
+    
+    // Pack-и
+    onData(msg);
+}
+
+void Storage::onData(const Message& msg) {
+    if (msg.type != MsgType::FULL) return;
+    
+    if (msg.full.topic == Topic::CALCULATOR && msg.full.payloadSize >= sizeof(TripPack)) {
+        TripPack p;
+        memcpy(&p, msg.full.payload, sizeof(TripPack));
+        
+        if (!tripValid || tripPackChanged(p, savedTrip)) {
+            savedTrip = p;
+            tripValid = true;
+            tripDirty = true;
+        }
+        return;
+    }
+    
+    if (msg.full.topic == Topic::STORAGE && msg.full.payloadSize >= sizeof(SettingsPack)) {
+        SettingsPack p;
+        memcpy(&p, msg.full.payload, sizeof(SettingsPack));
+        
+        if (!settingsValid || settingsPackChanged(p, savedSettings)) {
+            savedSettings = p;
+            settingsValid = true;
+            settingsDirty = true;
+        }
+        return;
+    }
+}
+
+void Storage::taskFunction(void* param) {
+    static_cast<Storage*>(param)->run();
+}
+
+void Storage::run() {
+    LOG_INFO(name, "Task started");
+    
+    while (true) {
+        unsigned long now = millis();
+        
+        if (tripDirty && (now - lastTripSaveMs >= TRIP_THROTTLE_MS)) {
+            saveTrip(savedTrip);
+            lastTripSaveMs = now;
+            tripDirty = false;
+        }
+        
+        if (settingsDirty && (now - lastSettingsSaveMs >= SETTINGS_THROTTLE_MS)) {
+            saveSettings(savedSettings);
+            lastSettingsSaveMs = now;
+            settingsDirty = false;
+        }
+        
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
+}
+
+// ============ Загрузка из NVS ============
+
+void Storage::loadAndPublish() {
+    prefs.begin(NS, false);
+    
+    // --- TripPack ---
+    TripPack trip;
+    memset(&trip, 0, sizeof(trip));
+    size_t len = prefs.getBytes(KEY_TRIP, &trip, sizeof(trip));
+    
+    if (len != sizeof(TripPack) || trip.version < 1 || trip.version > 2) {
+        trip.version = 2;
+        trip.fuel_level = 60.0f;
+        LOG_INFO(name, "TripPack: defaults");
+    } else {
+        LOG_INFO(name, "TripPack loaded: ODO=%.0f, tripA=%.1f, fuel=%.1f",
+                 trip.odo, trip.trip_a, trip.fuel_level);
+    }
+    savedTrip = trip;
+    tripValid = true;
+    tripDirty = false;
+    
+    // --- SettingsPack ---
+    SettingsPack cfg;
+    memset(&cfg, 0, sizeof(cfg));
+    len = prefs.getBytes(KEY_SETTINGS, &cfg, sizeof(cfg));
+    
+    if (len != sizeof(SettingsPack) || cfg.version != 1) {
+        cfg.version = 1;
+        cfg.tank_capacity = 60.0f;
+        cfg.injector_count = 4;
+        cfg.injector_flow = 250.0f;
+        cfg.pulses_per_meter = 3.0f;
+        cfg.kline_protocol = 0;
+        LOG_INFO(name, "SettingsPack: defaults");
+    } else {
+        LOG_INFO(name, "SettingsPack loaded: tank=%.1f, inj=%dx%.1f",
+                 cfg.tank_capacity, cfg.injector_count, cfg.injector_flow);
+    }
+    savedSettings = cfg;
+    settingsValid = true;
+    settingsDirty = false;
+    
+    prefs.end();
+    
+    // Публикуем напрямую в retain-кэш Router'а
+    // (send ещё не установлен, router.init() будет вызван позже)
+    Router& router = Router::instance();
+    
+    Message msgTrip = Message::createFull(Topic::CALCULATOR, CMD_NONE,
+                                           (const uint8_t*)&trip, sizeof(trip));
+    router.retainStore(msgTrip);
+    
+    Message msgCfg = Message::createFull(Topic::STORAGE, CMD_NONE,
+                                          (const uint8_t*)&cfg, sizeof(cfg));
+    router.retainStore(msgCfg);
+    
+    LOG_INFO(name, "Published TripPack and SettingsPack to retain cache");
+}
+
+// ============ Сохранение в NVS ============
+
+void Storage::saveTrip(const TripPack& p) {
+    prefs.begin(NS, false);
+    prefs.putBytes(KEY_TRIP, &p, sizeof(TripPack));
+    prefs.end();
+}
+
+void Storage::saveSettings(const SettingsPack& p) {
+    prefs.begin(NS, false);
+    prefs.putBytes(KEY_SETTINGS, &p, sizeof(SettingsPack));
+    prefs.end();
+}
+
+// ============ Сравнение ============
+
+bool Storage::tripPackChanged(const TripPack& a, const TripPack& b) {
+    const float EPSILON = 0.1f;
+    if (a.version != b.version) return true;
+    if (fabs((double)a.odo - (double)b.odo) > EPSILON) return true;
+    if (fabsf(a.trip_a - b.trip_a) > EPSILON) return true;
+    if (fabsf(a.trip_b - b.trip_b) > EPSILON) return true;
+    if (fabsf(a.fuel_trip_a - b.fuel_trip_a) > EPSILON) return true;
+    if (fabsf(a.fuel_trip_b - b.fuel_trip_b) > EPSILON) return true;
+    if (fabsf(a.fuel_level - b.fuel_level) > EPSILON) return true;
+    if (fabsf(a.avg_total - b.avg_total) > EPSILON) return true;
+    return false;
+}
+
+bool Storage::settingsPackChanged(const SettingsPack& a, const SettingsPack& b) {
+    const float EPSILON = 0.01f;
+    if (a.version != b.version) return true;
+    if (fabsf(a.tank_capacity - b.tank_capacity) > EPSILON) return true;
+    if (a.injector_count != b.injector_count) return true;
+    if (fabsf(a.injector_flow - b.injector_flow) > EPSILON) return true;
+    if (fabsf(a.pulses_per_meter - b.pulses_per_meter) > EPSILON) return true;
+    if (a.kline_protocol != b.kline_protocol) return true;
+    return false;
+}
+
+// ============ Команды ============
+
+void Storage::handleGetCfg(int msgId) {
+    char buf[256];
+    int len = snprintf(buf, sizeof(buf),
+        "{\"msg_id\":%d,\"cfg\":{"
+        "\"tV\":%.1f,"
+        "\"iPerf\":%.1f,"
+        "\"iCnt\":%d,"
+        "\"sSig\":%.3f,"
+        "\"kPrt\":%d,"
+        "\"fw\":\"1.0.0\""
+        "}}",
+        msgId,
+        savedSettings.tank_capacity,
+        savedSettings.injector_flow,
+        savedSettings.injector_count,
+        savedSettings.pulses_per_meter,
+        savedSettings.kline_protocol
+    );
+    
+    if (send) {
+        Message msg = Message::createFull(Topic::PROTOCOL, CMD_NONE,
+                                           (const uint8_t*)buf, len);
+        send(msg);
+    }
+    LOG_INFO(name, "Config sent: %s", buf);
+}
+
+void Storage::handleSetCfg(const char* json) {
+    auto getFloat = [](const char* json, const char* key, float def) -> float {
+        char search[32];
+        snprintf(search, sizeof(search), "\"%s\":", key);
+        const char* p = strstr(json, search);
+        if (p) return atof(p + strlen(search));
+        return def;
+    };
+    
+    auto getInt = [](const char* json, const char* key, int def) -> int {
+        char search[32];
+        snprintf(search, sizeof(search), "\"%s\":", key);
+        const char* p = strstr(json, search);
+        if (p) return atoi(p + strlen(search));
+        return def;
+    };
+    
+    SettingsPack pack = savedSettings;
+    pack.tank_capacity    = getFloat(json, "tV", pack.tank_capacity);
+    pack.injector_flow    = getFloat(json, "iPerf", pack.injector_flow);
+    pack.injector_count   = getInt(json, "iCnt", pack.injector_count);
+    pack.pulses_per_meter = getFloat(json, "sSig", pack.pulses_per_meter);
+    pack.kline_protocol   = getInt(json, "kPrt", pack.kline_protocol);
+    
+    savedSettings = pack;
+    settingsValid = true;
+    settingsDirty = true;
+    saveSettings(pack);
+    settingsDirty = false;
+    
+    if (send) {
+        Message msg = Message::createFull(Topic::STORAGE, CMD_NONE,
+                                           (const uint8_t*)&pack, sizeof(pack));
+        send(msg);
+    }
+    
+    LOG_INFO(name, "Config updated: tank=%.1f, inj=%d x %.1f",
+             pack.tank_capacity, pack.injector_count, pack.injector_flow);
+}
+
+// ============ Аварийное сохранение ============
+
+void Storage::forceSave() {
+    LOG_INFO(name, "=== EMERGENCY SAVE ===");
+    
+    if (tripDirty && tripValid) {
+        prefs.begin(NS, false);
+        prefs.putBytes(KEY_TRIP, &savedTrip, sizeof(TripPack));
+        prefs.end();
+        tripDirty = false;
+        LOG_INFO(name, "TripPack saved: ODO=%.0f", savedTrip.odo);
+    }
+    
+    if (settingsDirty && settingsValid) {
+        prefs.begin(NS, false);
+        prefs.putBytes(KEY_SETTINGS, &savedSettings, sizeof(SettingsPack));
+        prefs.end();
+        settingsDirty = false;
+        LOG_INFO(name, "SettingsPack saved");
+    }
+}
+// END src/modules/storage.cpp
+
+
+// START src/modules/storage.h
+// ======================================================================
+#ifndef STORAGE_H
+#define STORAGE_H
+
+#include "core/module.h"
+#include "core/packets.h"
+#include <Preferences.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+
+class Storage : public Module {
+public:
+    Storage();
+    
+    bool init() override;
+    void onMessage(const Message& msg) override;
+    void onData(const Message& msg) override;
+    
+    // Аварийное сохранение (при остановке двигателя)
+    void forceSave();
+    
+private:
+    static void taskFunction(void* param);
+    void run();
+    
+    TaskHandle_t taskHandle;
+    Preferences prefs;
+    
+    // Кэш последних сохранённых значений
+    TripPack     savedTrip;
+    SettingsPack savedSettings;
+    bool tripValid;
+    bool settingsValid;
+    bool tripDirty;          // есть несохранённые изменения TripPack
+    bool settingsDirty;      // есть несохранённые изменения SettingsPack
+    
+    // Троттлинг
+    unsigned long lastTripSaveMs;
+    unsigned long lastSettingsSaveMs;
+    static constexpr unsigned long TRIP_THROTTLE_MS     = 60000;
+    static constexpr unsigned long SETTINGS_THROTTLE_MS = 2000;
+    
+    // NVS-ключи
+    static constexpr const char* NS = "bkc_v2";
+    static constexpr const char* KEY_TRIP     = "trip";
+    static constexpr const char* KEY_SETTINGS = "settings";
+    
+    // Параметры задачи
+    static constexpr uint32_t     TASK_STACK = 3072;
+    static constexpr UBaseType_t  TASK_PRIO  = 1;
+    static constexpr BaseType_t   TASK_CORE  = 1;
+    
+    // Сравнение пакетов
+    bool tripPackChanged(const TripPack& a, const TripPack& b);
+    bool settingsPackChanged(const SettingsPack& a, const SettingsPack& b);
+    
+    // Загрузка из NVS и публикация
+    void loadAndPublish();
+    
+    // Сохранение
+    void saveTrip(const TripPack& p);
+    void saveSettings(const SettingsPack& p);
+    
+    // Обработчики команд
+    void handleGetCfg(int msgId);
+    void handleSetCfg(const char* json);
+};
+
+#endif
+// END src/modules/storage.h
+
+
+// START src/modules/transport.cpp
+// ======================================================================
+/**
+ * @file transport.cpp
+ * @brief Транспортный уровень — Bluetooth SPP.
+ */
+
+#include "transport.h"
+#include "core/logging.h"
+#include "core/message.h"
+
+bool Transport::init() {
+    LOG_INFO(name, "Init");
+    
+    rxLen = 0;
+    memset(rxBuffer, 0, RX_BUF_SIZE);
+    
+    if (!btSerial.begin("TripComputer")) {
+        LOG_ERROR(name, "BT init failed");
+        return false;
+    }
+    
+    LOG_INFO(name, "BT started as 'TripComputer'");
+    
+    BaseType_t result = xTaskCreatePinnedToCore(
+        rxTaskFunction, "BtRxTask", TASK_STACK,
+        this, TASK_PRIO, &rxTaskHandle, TASK_CORE
+    );
+    
+    if (result != pdPASS) {
+        LOG_ERROR(name, "Rx task create failed");
+        return false;
+    }
+    
+    LOG_INFO(name, "Rx task created, prio=%d", TASK_PRIO);
+    return true;
+}
+
+void Transport::onMessage(const Message& msg) {
+    if (msg.type != MsgType::FULL) return;
+    if (msg.full.topic != Topic::PROTOCOL) return;
+    
+    btSerial.write(msg.full.payload, msg.full.payloadSize);
+    btSerial.write('\n');
+}
+
+void Transport::tick() {
+    // Проверка изменения состояния подключения
+    bool connected = btSerial.hasClient();
+    static bool wasConnected = false;
+    
+    if (connected != wasConnected) {
+        wasConnected = connected;
+        LOG_INFO(name, "BT %s", connected ? "connected" : "disconnected");
+        
+        if (send) {
+            Message msg = Message::createFast(Topic::SYSTEM, CMD_TRANSPORT_STATUS, connected ? 1 : 0);
+            send(msg);
+        }
+    }
+}
+
+void Transport::rxTaskFunction(void* param) {
+    Transport* self = static_cast<Transport*>(param);
+    
+    while (true) {
+        self->processRx();
+        vTaskDelay(pdMS_TO_TICKS(5));
+    }
+}
+
+void Transport::processRx() {
+    while (btSerial.available() && rxLen < RX_BUF_SIZE - 1) {
+        char c = btSerial.read();
+        if (c == '\r') continue;
+        
+        rxBuffer[rxLen++] = c;
+        
+        if (c == '\n') {
+            rxBuffer[rxLen - 1] = '\0';
+            rxLen--;
+            
+            if (rxLen > 0) {
+                LOG_DEBUG("BtRxTask", "RX: '%s'", rxBuffer);
+                
+                if (send) {
+                    Message msg = Message::createFull(
+                        Topic::TRANSPORT, CMD_NONE,
+                        (const uint8_t*)rxBuffer, rxLen
+                    );
+                    send(msg);
+                }
+            }
+            rxLen = 0;
+        }
+        
+        if (rxLen >= RX_BUF_SIZE - 1) {
+            LOG_ERROR("BtRxTask", "Line overflow, clearing");
+            rxLen = 0;
+        }
+    }
+}
+// END src/modules/transport.cpp
+
+
+// START src/modules/transport.h
+// ======================================================================
+#ifndef TRANSPORT_H
+#define TRANSPORT_H
+
+#include "core/module.h"
+#include <BluetoothSerial.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+
+class Transport : public Module {
+public:
+    Transport() : Module("Transport") {}
+    
+    bool init() override;
+    void onMessage(const Message& msg) override;
+    void tick() override;
+    
+private:
+    BluetoothSerial btSerial;
+    
+    static constexpr uint32_t TASK_STACK = 3072;
+    static constexpr UBaseType_t TASK_PRIO = 3;
+    static constexpr BaseType_t TASK_CORE = 1;
+    
+    TaskHandle_t rxTaskHandle;
+    
+    static constexpr size_t RX_BUF_SIZE = 512;
+    char rxBuffer[RX_BUF_SIZE];
+    uint16_t rxLen;
+    
+    static void rxTaskFunction(void* param);
+    void processRx();
+};
+
+#endif
+// END src/modules/transport.h
+
+
+// START src/router.cpp
+// ======================================================================
+#include "router.h"
+
+Router& Router::instance() {
+    static Router router;
+    return router;
+}
+
+bool Router::init() {
+    LOG_INFO("ROUTER", "Init start, modules=%d", moduleCount);
+    
+    msgQueue = xQueueCreate(ROUTER_QUEUE_SIZE, sizeof(Message));
+    if (msgQueue == nullptr) {
+        LOG_ERROR("ROUTER", "Queue create failed");
+        return false;
+    }
+    
+    BaseType_t result = xTaskCreatePinnedToCore(
+        routerTaskFunction, "RouterTask", ROUTER_TASK_STACK,
+        this, ROUTER_TASK_PRIO, &routerTask, ROUTER_TASK_CORE
+    );
+    
+    if (result != pdPASS) {
+        LOG_ERROR("ROUTER", "Task create failed");
+        return false;
+    }
+    
+    // Устанавливаем send callback и вливаем retain-кэш
+    for (uint8_t i = 0; i < moduleCount; i++) {
+        modules[i].module->send = sendCallback;
+        
+        if (modules[i].retain) {
+            retainInject(modules[i].module);
+        }
+    }
+    
+    LOG_INFO("ROUTER", "Init done, queue=%p, task=%p", msgQueue, routerTask);
+    return true;
+}
+
+void Router::registerModule(Module* module, uint16_t topics, bool retain) {
+    if (moduleCount >= ROUTER_MAX_MODULES) {
+        LOG_ERROR("ROUTER", "Max modules reached");
+        return;
+    }
+    
+    modules[moduleCount].module = module;
+    modules[moduleCount].topics = topics;
+    modules[moduleCount].retain = retain;
+    moduleCount++;
+    
+    LOG_INFO("ROUTER", "Registered: %s, topics=0x%04X, retain=%d", 
+             module->name, topics, retain);
+}
+
+bool Router::post(const Message& msg) {
+    if (msgQueue == nullptr) return false;
+    return (xQueueSend(msgQueue, &msg, 0) == pdTRUE);
+}
+
+bool Router::postFromISR(const Message& msg, BaseType_t* pxHigherPriorityTaskWoken) {
+    if (msgQueue == nullptr) return false;
+    return (xQueueSendFromISR(msgQueue, &msg, pxHigherPriorityTaskWoken) == pdTRUE);
+}
+
+void Router::sendCallback(const Message& msg) {
+    Router::instance().post(msg);
+}
+
+void Router::routerTaskFunction(void* param) {
+    Router* self = static_cast<Router*>(param);
+    Message msg;
+    
+    LOG_INFO("ROUTER", "Task started");
+    
+    while (true) {
+        if (xQueueReceive(self->msgQueue, &msg, portMAX_DELAY) == pdTRUE) {
+            self->processMessage(msg);
+        }
+        
+        for (uint8_t i = 0; i < self->moduleCount; i++) {
+            self->modules[i].module->tick();
+        }
+        
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+}
+
+void Router::processMessage(const Message& msg) {
+    uint16_t topic = (msg.type == MsgType::FAST) ? msg.fast.topic : msg.full.topic;
+    uint8_t  cmd   = (msg.type == MsgType::FAST) ? msg.fast.cmd   : msg.full.cmd;
+    
+    // Сохраняем в retain-кэш (для Pack-ов)
+    if (msg.type == MsgType::FULL && cmd == CMD_NONE) {
+        retainStore(msg);
+    }
+    
+    // Диспатч подписчикам
+    for (uint8_t i = 0; i < moduleCount; i++) {
+        if (modules[i].topics & topic) {
+            modules[i].module->onMessage(msg);
+        }
+    }
+}
+
+// ============ Retain ============
+
+int Router::topicBit(uint16_t topic) {
+    for (int i = 0; i < 16; i++) {
+        if (topic & (1 << i)) return i;
+    }
+    return -1;
+}
+
+void Router::retainStore(const Message& msg) {
+    uint16_t topic = msg.full.topic;
+    int bit = topicBit(topic);
+    
+    if (bit < 0 || bit >= 16) return;
+    if (msg.full.payloadSize > ROUTER_RETAIN_SIZE) return;
+    
+    RetainSlot& slot = retainSlots[bit];
+    slot.valid = true;
+    slot.topic = topic;
+    slot.size = msg.full.payloadSize;
+    memcpy(slot.data, msg.full.payload, msg.full.payloadSize);
+}
+
+void Router::retainInject(Module* module) {
+    if (!module->send) return;
+    
+    for (int bit = 0; bit < 16; bit++) {
+        if (!(module->subscribedTopic & (1 << bit))) continue;
+        if (!retainSlots[bit].valid) continue;
+        
+        RetainSlot& slot = retainSlots[bit];
+        
+        Message msg = Message::createFull(slot.topic, CMD_NONE, slot.data, slot.size);
+        module->onMessage(msg);
+        
+        LOG_INFO("ROUTER", "Retain: %s gets topic=0x%04X, size=%d", 
+                 module->name, slot.topic, slot.size);
+    }
+}
+// END src/router.cpp
+
+
+// START src/router.h
+// ======================================================================
+#ifndef ROUTER_H
+#define ROUTER_H
+
+#include "core/message.h"
+#include "core/module.h"
+#include "core/logging.h"
+#include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
+#include <freertos/task.h>
+
+#define ROUTER_QUEUE_SIZE   64
+#define ROUTER_TASK_STACK   4096
+#define ROUTER_TASK_PRIO    2
+#define ROUTER_TASK_CORE    1
+#define ROUTER_MAX_MODULES  12
+
+// Размер retain-кэша для одного топика (максимальный Pack ~80 байт)
+#define ROUTER_RETAIN_SIZE  128
+
+class Router {
+public:
+    static Router& instance();
+    
+    /**
+     * @brief Инициализация: создаёт очередь и задачу обработки.
+     * Должна вызываться ПОСЛЕ регистрации всех модулей.
+     */
+    bool init();
+    
+    /**
+     * @brief Зарегистрировать модуль.
+     * @param module Указатель на модуль
+     * @param topics  Битовая маска топиков
+     * @param retain  true = модуль хочет получить кэшированные данные при старте
+     */
+    void registerModule(Module* module, uint16_t topics, bool retain = false);
+    
+    /**
+     * @brief Отправить сообщение (из задачи или callback).
+     */
+    bool post(const Message& msg);
+    
+    /**
+     * @brief Отправить сообщение из ISR.
+     */
+    bool postFromISR(const Message& msg, BaseType_t* pxHigherPriorityTaskWoken);
+        
+    // Сохранить сообщение в retain-кэш
+    void retainStore(const Message& msg);
+
+    Router(const Router&) = delete;
+    Router& operator=(const Router&) = delete;
+    
+private:
+    Router() = default;
+    
+    QueueHandle_t msgQueue;
+    TaskHandle_t  routerTask;
+    uint8_t       moduleCount;
+    
+    struct ModuleEntry {
+        Module*  module;
+        uint16_t topics;
+        bool     retain;   // true = влить кэш при init
+    };
+    ModuleEntry modules[ROUTER_MAX_MODULES];
+    
+    // Retain-кэш: по одному слоту на каждый бит топика (до 16 слотов)
+    struct RetainSlot {
+        bool     valid = false;
+        uint16_t topic = 0;
+        uint8_t  data[ROUTER_RETAIN_SIZE];
+        uint16_t size = 0;
+    };
+    RetainSlot retainSlots[16];  // Индекс = номер бита (0..15)
+    
+    static void sendCallback(const Message& msg);
+    static void routerTaskFunction(void* param);
+    void processMessage(const Message& msg);
+    
+    // Влить retain-кэш в модуль (при init)
+    void retainInject(Module* module);
+    
+    // Получить индекс бита (0..15) из маски топика
+    static int topicBit(uint16_t topic);
+};
+
+#endif
+// END src/router.h
+
