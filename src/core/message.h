@@ -27,26 +27,46 @@ namespace Topic {
 
 enum Command : uint8_t {
     CMD_NONE            = 0x00,
+
+    // Управление trip/топливом (Calculator)
     CMD_RESET_TRIP_A    = 0x01,
     CMD_RESET_TRIP_B    = 0x02,
     CMD_RESET_AVG       = 0x03,
     CMD_FULL_TANK       = 0x04,
     CMD_CORRECT_ODO     = 0x05,
+
+    // Настройки (Protocol)
     CMD_GET_CFG         = 0x06,
     CMD_SET_CFG         = 0x07,
+
+    // K-Line диагностика
     CMD_KL_GET_DTC      = 0x08,
     CMD_KL_CLEAR_DTC    = 0x09,
     CMD_KL_RESET_ADAPT  = 0x0A,
     CMD_KL_PUMP_ATF     = 0x0B,
     CMD_KL_DETECT_PROTO = 0x0C,
+
+    // Калибровка (Engine)
     CMD_CALIBRATE_SPEED    = 0x0D,
     CMD_CALIBRATE_INJECTOR = 0x0E,
     CMD_CALIBRATE_DEADTIME = 0x0F,
+
+    // OTA — внешние (Android ↔ Protocol)
     CMD_OTA_END         = 0x10,
     CMD_OTA_START       = 0x11,
+
+    // Транспорт
     CMD_TRANSPORT_STATUS = 0x12,
+
+    // Телеметрия
     CMD_START_TELEMETRY  = 0x13,
     CMD_STOP_TELEMETRY   = 0x14,
+
+    // OTA — внутренние (Protocol ↔ OTA Module)
+    CMD_OTA_INIT        = 0x15,  // OTA → Protocol: готов, размер чанка
+    CMD_OTA_WRITE       = 0x16,  // OTA → Protocol: чанк записан, номер
+    CMD_OTA_UPDATE      = 0x17,  // Protocol → OTA: начать, размер прошивки
+    CMD_OTA_DATA        = 0x18,  // Protocol → OTA: чанк данных (через Topic::OTA)
 };
 
 struct FastMsg {

@@ -2,23 +2,14 @@
 #include "core/message.h"
 #include "core/logging.h"
 
-volatile bool Simulator::btnEngine = false;
-volatile bool Simulator::btnLights = false;
-
-void IRAM_ATTR Simulator::isrEngine() { btnEngine = true; }
-void IRAM_ATTR Simulator::isrLights() { btnLights = true; }
-
 bool Simulator::onInit() {
     memset(&pack, 0, sizeof(pack));
     pack.version = 3; pack.voltage = 12.7f; pack.not_fuel = true;
     
-    // Подписка на настройки от Storage
     subscribeNew(Topic::STORAGE, sizeof(SettingsPack));
     
     pinMode(PIN_ENGINE, INPUT_PULLUP);
     pinMode(PIN_LIGHTS, INPUT_PULLUP);
-    attachInterrupt(digitalPinToInterrupt(PIN_ENGINE), isrEngine, FALLING);
-    attachInterrupt(digitalPinToInterrupt(PIN_LIGHTS), isrLights, FALLING);
     
     analogReadResolution(12);
     analogSetAttenuation(ADC_11db);
@@ -38,16 +29,19 @@ bool Simulator::onInit() {
 void Simulator::onCommand(const CommandMsg& cmd) {
     if (cmd.cmd == CMD_FULL_TANK) {
         fuelBase = tankCapacity; fuelUsed = 0;
+        LOG_INFO(name, "Full tank: %.1f L", fuelBase);
     }
 }
 
 void Simulator::onData(uint16_t topic, const void* data) {
     if (topic == Topic::STORAGE) {
         const SettingsPack* p = (const SettingsPack*)data;
-        if (!fuelLoaded) { 
-            fuelBase = p->tank_capacity; 
+        if (!fuelLoaded) {
             fuelLoaded = true;
-            LOG_INFO(name, "Settings loaded: tank=%.1f", p->tank_capacity);
+            // Если есть сохранённый остаток — берём его, иначе tank_capacity
+            fuelBase = (p->fuel_level > 0.01f) ? p->fuel_level : p->tank_capacity;
+            LOG_INFO(name, "Fuel base: %.1f (saved: %.1f, tank: %.1f)", 
+                     fuelBase, p->fuel_level, p->tank_capacity);
         }
         tankCapacity = p->tank_capacity;
     }
@@ -56,11 +50,20 @@ void Simulator::onData(uint16_t topic, const void* data) {
 void Simulator::onProcess() {
     unsigned long now = millis();
     
-    // Кнопка двигателя
-    if (btnEngine && digitalRead(PIN_ENGINE) == LOW) {
-        static unsigned long pressStart;
-        if (pressStart == 0) pressStart = now;
-        if (now - pressStart >= 800) {
+    // ====== Кнопка двигателя с антидребезгом ======
+    static unsigned long engineLastChange = 0;
+    static bool engineLastState = HIGH;
+    static unsigned long enginePressStart = 0;
+    bool engineRaw = digitalRead(PIN_ENGINE);
+    
+    if (engineRaw != engineLastState) {
+        engineLastChange = now;
+        engineLastState = engineRaw;
+    }
+    
+    if (engineRaw == LOW && (now - engineLastChange >= 50)) {
+        if (enginePressStart == 0) enginePressStart = now;
+        if (now - enginePressStart >= 800) {
             engineRunning = !engineRunning;
             if (engineRunning) { 
                 distance = 0; fuelUsed = 0;
@@ -68,17 +71,34 @@ void Simulator::onProcess() {
             } else {
                 LOG_INFO(name, "Engine STOPPED");
             }
-            pressStart = 0;
+            enginePressStart = 0;
         }
+    } else if (engineRaw == HIGH) {
+        enginePressStart = 0;
     }
     
-    // Габариты
-    if (btnLights) {
-        btnLights = false;
-        if (digitalRead(PIN_LIGHTS) == HIGH) parkingLights = !parkingLights;
+    // ====== Кнопка габаритов с антидребезгом ======
+    static unsigned long lightsLastChange = 0;
+    static bool lightsLastState = HIGH;
+    static bool lightsHandled = false;
+    bool lightsRaw = digitalRead(PIN_LIGHTS);
+    
+    if (lightsRaw != lightsLastState) {
+        lightsLastChange = now;
+        lightsLastState = lightsRaw;
     }
     
-    // Потенциометр
+    if (lightsRaw == LOW && (now - lightsLastChange >= 50)) {
+        if (!lightsHandled) {
+            lightsHandled = true;
+            parkingLights = !parkingLights;
+            LOG_INFO(name, "Parking lights: %s", parkingLights ? "ON" : "OFF");
+        }
+    } else if (lightsRaw == HIGH) {
+        lightsHandled = false;
+    }
+    
+    // ====== Опрос потенциометра (каждые 20 мс) ======
     if (now - lastPotRead >= 20) {
         lastPotRead = now;
         int raw = analogRead(PIN_POT);
@@ -86,7 +106,7 @@ void Simulator::onProcess() {
         throttle = constrain(filteredRaw / 4095.0f, 0.0f, 1.0f);
     }
     
-    // Физика
+    // ====== Физика (каждые 20 мс) ======
     if (now - lastPhysics >= 20) {
         lastPhysics = now;
         if (engineRunning) {
@@ -104,7 +124,7 @@ void Simulator::onProcess() {
         }
     }
     
-    // Публикация
+    // ====== Публикация EnginePack (каждые 100 мс) ======
     if (now - lastPublish >= 100) {
         lastPublish = now;
         pack.speed = speed;
@@ -116,10 +136,13 @@ void Simulator::onProcess() {
         pack.distance = distance;
         pack.fuel_used = fuelUsed;
         pack.fuel_level_sensor = max(0.0f, fuelBase - fuelUsed);
-        publish(Topic::SENSOR, &pack, sizeof(pack));
         
         static int lc = 0; lc++;
-        if (lc % 100 == 0) LOG_DEBUG(name, "Pub #%d: spd=%.1f, fuel=%.1f", lc, speed, fuelBase - fuelUsed);
+        if (lc % 500 == 0) {
+            LOG_DEBUG(name, "Pub #%d: spd=%.1f, fuel=%.1f", lc, speed, pack.fuel_level_sensor);
+        }
+        
+        publish(Topic::SENSOR, &pack, sizeof(pack));
     }
 }
 

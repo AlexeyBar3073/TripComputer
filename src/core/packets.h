@@ -89,6 +89,7 @@ typedef struct {
 typedef struct {
     uint8_t  version;           // Версия пакета (текущая: 1)
     float    tank_capacity;     // Ёмкость бака (л, по умолчанию 60.0)
+    float    fuel_level;        // Уровень топлива в баке (л, по умолчанию 60.0 или загруженный из TripPack)
     uint8_t  injector_count;    // Количество форсунок (по умолчанию 4)
     float    injector_flow;     // Производительность форсунки (мл/мин, по умолчанию 250.0)
     float    pulses_per_meter;  // Импульсов датчика скорости на 1 метр

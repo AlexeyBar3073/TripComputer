@@ -11,9 +11,11 @@
  * value — параметр (например: odo_value для CMD_CORRECT_ODO, 
  *         connected=1/0 для CMD_TRANSPORT_STATUS)
  */
+#pragma pack(push, 1)
 struct CommandMsg {
     uint8_t cmd;
     float   value;
 };
+#pragma pack(pop)
 
 #endif

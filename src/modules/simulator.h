@@ -26,9 +26,6 @@ private:
     bool pedalConnected = false;
     
     static constexpr int PIN_ENGINE = 26, PIN_LIGHTS = 27, PIN_POT = 33;
-    static volatile bool btnEngine, btnLights;
-    static void IRAM_ATTR isrEngine();
-    static void IRAM_ATTR isrLights();
     
     float getRpm();
     float getInstantFuel();
