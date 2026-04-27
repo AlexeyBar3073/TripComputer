@@ -7,7 +7,7 @@
 
 #define FW_VERSION_MAJOR 0
 #define FW_VERSION_MINOR 3
-#define FW_VERSION_BUILD 0
-#define FW_VERSION_STR   "0.3.0"
+#define FW_VERSION_BUILD 7
+#define FW_VERSION_STR   "0.3.7"
 
 #endif

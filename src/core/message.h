@@ -67,6 +67,7 @@ enum Command : uint8_t {
     CMD_OTA_WRITE       = 0x16,  // OTA → Protocol: чанк записан, номер
     CMD_OTA_UPDATE      = 0x17,  // Protocol → OTA: начать, размер прошивки
     CMD_OTA_DATA        = 0x18,  // Protocol → OTA: чанк данных (через Topic::OTA)
+    CMD_OTA_RESTART     = 0x19, // OTA → Protocol: перезагрузка после успешного обновления
 };
 
 struct FastMsg {

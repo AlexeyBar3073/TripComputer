@@ -109,6 +109,8 @@ private:
 
     // === Обновление прошивки ===
     int otaFirmwareSize = 0;
+    bool _pendingOtaSuccess = false;
+    bool _needVersionCheck = false;
 
     // === JSON-документы ===
     #pragma GCC diagnostic push

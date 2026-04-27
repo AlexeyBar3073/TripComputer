@@ -94,6 +94,7 @@ typedef struct {
     float    injector_flow;     // Производительность форсунки (мл/мин, по умолчанию 250.0)
     float    pulses_per_meter;  // Импульсов датчика скорости на 1 метр
     uint8_t  kline_protocol;    // Протокол K-Line (0=авто)
+    char     fw_version[12];    // Версия прошивки (для отображения в приложении)
 } SettingsPack;
 #pragma pack(pop)
 

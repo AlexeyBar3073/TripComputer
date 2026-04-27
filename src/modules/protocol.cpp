@@ -88,6 +88,8 @@ bool Protocol::onInit() {
     subscribeNew(Topic::KLINE,      sizeof(KlinePack));
     subscribeNew(Topic::SERVICE,    sizeof(ClimatePack));
     subscribeNew(Topic::STORAGE,    sizeof(SettingsPack));
+
+    _needVersionCheck = true;
     return true;
 }
 
@@ -103,6 +105,14 @@ void Protocol::onCommand(const CommandMsg& cmd) {
         case CMD_TRANSPORT_STATUS:
             transportOnline = (cmd.value != 0);
             LOG_INFO(name, "Transport %s", transportOnline ? "ONLINE" : "OFFLINE");
+            
+            if (transportOnline && _pendingOtaSuccess) {
+                _pendingOtaSuccess = false;
+                outDoc.clear();
+                outDoc["ota_success"] = true;
+                outDoc["version"] = FW_VERSION_STR;
+                sendJson();
+            }
             break;
             
         case CMD_OTA_INIT: {
@@ -130,6 +140,12 @@ void Protocol::onCommand(const CommandMsg& cmd) {
             sendJson();
             break;
         }
+        
+        case CMD_OTA_RESTART:
+            outDoc.clear();
+            outDoc["ota_restart"] = 1;
+            sendJson();
+            break;
     }
 }
 
@@ -144,40 +160,50 @@ void Protocol::onCommand(const CommandMsg& cmd) {
 void Protocol::onData(uint16_t topic, const void* data) {
     switch (topic) {
         case Topic::TRANSPORT:
-            // Входящая JSON-команда
             processIncoming((const char*)data);
             break;
-
+            
         case Topic::SENSOR:
-            // Данные с датчиков
             memcpy(&engine, data, sizeof(EnginePack));
             engineOk = true;
             break;
-
+            
         case Topic::CALCULATOR:
-            // Данные о поездке
             memcpy(&trip, data, sizeof(TripPack));
             tripOk = true;
-            //LOG_DEBUG(name, "Trip: ODO=%.0f", trip.odo);
             break;
-
+            
         case Topic::KLINE:
-            // Данные K-Line
             memcpy(&kline, data, sizeof(KlinePack));
             klineOk = true;
             break;
-
+            
         case Topic::SERVICE:
-            // Данные климат-системы
             memcpy(&climate, data, sizeof(ClimatePack));
             climateOk = true;
             break;
-
+            
         case Topic::STORAGE:
-            // Настройки устройства
             memcpy(&settings, data, sizeof(SettingsPack));
             settingsOk = true;
             LOG_INFO(name, "Settings: tank=%.1f", settings.tank_capacity);
+            
+            if (_needVersionCheck) {
+                _needVersionCheck = false;
+                if (strcmp(settings.fw_version, FW_VERSION_STR) != 0 && settings.fw_version[0] != '\0') {
+                    LOG_INFO(name, "OTA success: %s -> %s", settings.fw_version, FW_VERSION_STR);
+                    _pendingOtaSuccess = true;
+                    if (transportOnline) {
+                        _pendingOtaSuccess = false;
+                        outDoc.clear();
+                        outDoc["ota_success"] = true;
+                        outDoc["version"] = FW_VERSION_STR;
+                        sendJson();
+                    }
+                }
+                strncpy(settings.fw_version, FW_VERSION_STR, sizeof(settings.fw_version));
+                publish(Topic::STORAGE, &settings, sizeof(SettingsPack));
+            }
             break;
     }
 }
@@ -188,6 +214,15 @@ void Protocol::onData(uint16_t topic, const void* data) {
  * Вызывает sendTelemetry() для отправки данных, если разрешено.
  */
 void Protocol::onProcess() {
+    if (_pendingOtaSuccess && transportOnline) {
+        LOG_INFO(name, "Sending OTA success...");
+        _pendingOtaSuccess = false;
+        outDoc.clear();
+        outDoc["ota_success"] = true;
+        outDoc["version"] = FW_VERSION_STR;
+        sendJson();
+    }
+    
     sendTelemetry();
 }
 

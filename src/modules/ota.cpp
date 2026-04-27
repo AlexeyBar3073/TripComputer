@@ -32,17 +32,24 @@ void Ota::onCommand(const CommandMsg& cmd) {
                 publish(Topic::SYSTEM, &resp, sizeof(resp));
             }
             break;
-            
+
         case CMD_OTA_END:
-            if (otaActive && Update.end(true)) {
+            if (otaActive && Update.end(true))
+            {
+                // Шлём ota_restart через Protocol
+                CommandMsg resp = {CMD_OTA_RESTART, 0};
+                publish(Topic::SYSTEM, &resp, sizeof(resp));
+
                 LOG_INFO(name, "OTA complete: %u bytes, rebooting...", written);
-                delay(500);
+                delay(200); // даём время на отправку
                 ESP.restart();
-            } else {
+            }
+            else
+            {
                 LOG_ERROR(name, "OTA end failed");
             }
             break;
-    }
+        }
 }
 
 void Ota::onData(uint16_t topic, const void* data) {
