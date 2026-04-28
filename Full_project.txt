@@ -24,6 +24,8 @@ monitor_speed = 115200
 build_flags = -DDEBUG_ENABLE
 upload_resetmethod = nodemcu
 lib_deps = bblanchon/ArduinoJson
+board_build.partitions = partitions_4mb.csv
+extra_scripts = post:extra_script.py
 // END platformio.ini
 
 
@@ -185,6 +187,7 @@ enum Command : uint8_t {
     CMD_OTA_WRITE       = 0x16,  // OTA → Protocol: чанк записан, номер
     CMD_OTA_UPDATE      = 0x17,  // Protocol → OTA: начать, размер прошивки
     CMD_OTA_DATA        = 0x18,  // Protocol → OTA: чанк данных (через Topic::OTA)
+    CMD_OTA_RESTART     = 0x19, // OTA → Protocol: перезагрузка после успешного обновления
 };
 
 struct FastMsg {
@@ -688,6 +691,7 @@ typedef struct {
     float    injector_flow;     // Производительность форсунки (мл/мин, по умолчанию 250.0)
     float    pulses_per_meter;  // Импульсов датчика скорости на 1 метр
     uint8_t  kline_protocol;    // Протокол K-Line (0=авто)
+    char     fw_version[12];    // Версия прошивки (для отображения в приложении)
 } SettingsPack;
 #pragma pack(pop)
 
@@ -706,8 +710,8 @@ typedef struct {
 
 #define FW_VERSION_MAJOR 0
 #define FW_VERSION_MINOR 3
-#define FW_VERSION_BUILD 0
-#define FW_VERSION_STR   "0.3.0"
+#define FW_VERSION_BUILD 7
+#define FW_VERSION_STR   "0.3.7"
 
 #endif
 // END src/core/version.h
@@ -1185,10 +1189,29 @@ private:
 
 // START src/modules/climate.cpp
 // ======================================================================
+/**
+ * @file climate.cpp
+ * @brief Реализация модуля эмуляции климатических данных.
+ * 
+ * Содержит реализацию методов класса Climate для генерации и публикации
+ * данных о состоянии климатической системы автомобиля. Данные включают
+ * температуру внутри и снаружи, давление в шинах и уровень омывателя.
+ */
+
 #include "climate.h"
 #include "core/message.h"
 #include "core/logging.h"
 
+/**
+ * @brief Инициализация модуля Climate.
+ * 
+ * Выполняет начальную настройку модуля при старте системы:
+ * - Обнуляет структуру данных с помощью memset
+ * - Устанавливает версию пакета данных
+ * - Задает начальные значения температур
+ * 
+ * @return true — инициализация всегда успешна
+ */
 bool Climate::onInit() {
     memset(&pack, 0, sizeof(pack));
     pack.version = 1;
@@ -1196,6 +1219,20 @@ bool Climate::onInit() {
     return true;
 }
 
+/**
+ * @brief Периодическая обработка и генерация данных.
+ * 
+ * Метод вызывается регулярно из основного цикла приложения. Выполняет:
+ * - Проверку времени с последней публикации (раз в секунду)
+ * - Генерацию новых случайных значений для всех параметров
+ * - Публикацию обновленных данных в топик Topic::SERVICE
+ * 
+ * Генерируемые данные:
+ * - Внутренняя температура: случайное значение от 20.0 до 25.0°C
+ * - Внешняя температура: случайное значение от 10.0 до 18.0°C
+ * - Давление в шинах: 5% вероятность низкого давления (true)
+ * - Уровень омывателя: 3% вероятность низкого уровня (true)
+ */
 void Climate::onProcess() {
     unsigned long now = millis();
     if (now - lastPublish >= 1000) {
@@ -1212,22 +1249,83 @@ void Climate::onProcess() {
 
 // START src/modules/climate.h
 // ======================================================================
+/**
+ * @file climate.h
+ * @brief Модуль эмуляции данных климатической системы.
+ * 
+ * Класс Climate генерирует и публикует данные о состоянии климатической системы,
+ * включая температуру внутри и снаружи автомобиля, давление в шинах и уровень
+ * омывателя. Данные публикуются в топик Topic::SERVICE каждую секунду.
+ * 
+ * Основные функции:
+ * - Генерация случайных значений температур
+ * - Эмуляция низкого давления в шинах (5% вероятность)
+ * - Эмуляция низкого уровня омывателя (3% вероятность)
+ * - Периодическая публикация данных в шину сообщений
+ */
+
 #ifndef CLIMATE_H
 #define CLIMATE_H
 
 #include "core/module.h"
 #include "core/packets.h"
 
+/**
+ * @class Climate
+ * @brief Модуль эмуляции климатических данных.
+ * 
+ * Генерирует и публикует данные о состоянии климатической системы
+ * для отображения на приборной панели. Используется для тестирования
+ * интерфейса отображения без реальных датчиков.
+ */
 class Climate : public Module {
 public:
+    /**
+     * @brief Конструктор модуля.
+     * 
+     * Устанавливает имя модуля как "Climate" для логирования.
+     */
     Climate() : Module("Climate") {}
-    
+
 protected:
+    /**
+     * @brief Инициализация модуля.
+     * 
+     * Инициализирует данные климатической системы с начальными значениями:
+     * - Внутренняя температура: 22°C
+     * - Внешняя температура: 15°C
+     * 
+     * @return true — всегда успешна
+     */
     bool onInit() override;
+
+    /**
+     * @brief Периодическая обработка.
+     * 
+     * Каждую секунду генерирует новые случайные значения для:
+     * - Внутренней температуры (20-25°C)
+     * - Внешней температуры (10-18°C)
+     * - Давления в шинах (5% вероятность низкого давления)
+     * - Уровня омывателя (3% вероятность низкого уровня)
+     * 
+     * Сгенерированные данные публикуются в топик Topic::SERVICE.
+     */
     void onProcess() override;
-    
+
 private:
+    /**
+     * @brief Структура данных климатической системы.
+     * 
+     * Содержит все данные, связанные с климатом и сервисными системами,
+     * которые публикуются в шину сообщений.
+     */
     ClimatePack pack;
+
+    /**
+     * @brief Время последней публикации данных.
+     * 
+     * Используется для управления периодичностью публикации (раз в секунду).
+     */
     unsigned long lastPublish = 0;
 };
 
@@ -1434,10 +1532,10 @@ private:
 static const char B64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 bool Ota::onInit() {
-    chunkQueue = xQueueCreate(3, sizeof(OtaChunk));
+    chunkQueue = xQueueCreate(1, sizeof(OtaChunk));
     if (!chunkQueue) return false;
     
-    subscribe(Topic::OTA, chunkQueue, sizeof(OtaChunk), 3);
+    subscribe(Topic::OTA, chunkQueue, sizeof(OtaChunk), 1);  // OVERWRITE
     return true;
 }
 
@@ -1459,23 +1557,40 @@ void Ota::onCommand(const CommandMsg& cmd) {
                 publish(Topic::SYSTEM, &resp, sizeof(resp));
             }
             break;
-            
+
         case CMD_OTA_END:
-            if (otaActive && Update.end(true)) {
+            if (otaActive && Update.end(true))
+            {
+                // Шлём ota_restart через Protocol
+                CommandMsg resp = {CMD_OTA_RESTART, 0};
+                publish(Topic::SYSTEM, &resp, sizeof(resp));
+
                 LOG_INFO(name, "OTA complete: %u bytes, rebooting...", written);
-                delay(500);
+                delay(200); // даём время на отправку
                 ESP.restart();
-            } else {
+            }
+            else
+            {
                 LOG_ERROR(name, "OTA end failed");
             }
             break;
-    }
+        }
 }
 
 void Ota::onData(uint16_t topic, const void* data) {
-    if (topic == Topic::OTA && otaActive) {
-        const OtaChunk* chunk = (const OtaChunk*)data;
-        processChunk(chunk);
+    if (topic == Topic::OTA) {
+        OtaChunk chunk;  // <-- ЛОКАЛЬНАЯ КОПИЯ НА СТЕКЕ
+        memcpy(&chunk, data, sizeof(OtaChunk));
+        
+        LOG_INFO(name, "Got chunk: pack=%d, len=%d", chunk.pack, chunk.bin_len);
+        if (otaActive) {
+            processChunk(&chunk);
+        } else {
+            LOG_INFO(name, "OTA not active, initializing...");
+            if (initializeUpdate()) {
+                processChunk(&chunk);
+            }
+        }
     }
 }
 
@@ -1506,6 +1621,7 @@ bool Ota::initializeUpdate() {
 }
 
 void Ota::processChunk(const OtaChunk* chunk) {
+    LOG_INFO(name, "Processing chunk %d", chunk->pack);
     if (!chunk || chunk->pack == 0) return;
     
     // Инициализация при первом чанке
@@ -1732,6 +1848,8 @@ bool Protocol::onInit() {
     subscribeNew(Topic::KLINE,      sizeof(KlinePack));
     subscribeNew(Topic::SERVICE,    sizeof(ClimatePack));
     subscribeNew(Topic::STORAGE,    sizeof(SettingsPack));
+
+    _needVersionCheck = true;
     return true;
 }
 
@@ -1747,6 +1865,14 @@ void Protocol::onCommand(const CommandMsg& cmd) {
         case CMD_TRANSPORT_STATUS:
             transportOnline = (cmd.value != 0);
             LOG_INFO(name, "Transport %s", transportOnline ? "ONLINE" : "OFFLINE");
+            
+            if (transportOnline && _pendingOtaSuccess) {
+                _pendingOtaSuccess = false;
+                outDoc.clear();
+                outDoc["ota_success"] = true;
+                outDoc["version"] = FW_VERSION_STR;
+                sendJson();
+            }
             break;
             
         case CMD_OTA_INIT: {
@@ -1774,6 +1900,12 @@ void Protocol::onCommand(const CommandMsg& cmd) {
             sendJson();
             break;
         }
+        
+        case CMD_OTA_RESTART:
+            outDoc.clear();
+            outDoc["ota_restart"] = 1;
+            sendJson();
+            break;
     }
 }
 
@@ -1788,40 +1920,50 @@ void Protocol::onCommand(const CommandMsg& cmd) {
 void Protocol::onData(uint16_t topic, const void* data) {
     switch (topic) {
         case Topic::TRANSPORT:
-            // Входящая JSON-команда
             processIncoming((const char*)data);
             break;
-
+            
         case Topic::SENSOR:
-            // Данные с датчиков
             memcpy(&engine, data, sizeof(EnginePack));
             engineOk = true;
             break;
-
+            
         case Topic::CALCULATOR:
-            // Данные о поездке
             memcpy(&trip, data, sizeof(TripPack));
             tripOk = true;
-            //LOG_DEBUG(name, "Trip: ODO=%.0f", trip.odo);
             break;
-
+            
         case Topic::KLINE:
-            // Данные K-Line
             memcpy(&kline, data, sizeof(KlinePack));
             klineOk = true;
             break;
-
+            
         case Topic::SERVICE:
-            // Данные климат-системы
             memcpy(&climate, data, sizeof(ClimatePack));
             climateOk = true;
             break;
-
+            
         case Topic::STORAGE:
-            // Настройки устройства
             memcpy(&settings, data, sizeof(SettingsPack));
             settingsOk = true;
             LOG_INFO(name, "Settings: tank=%.1f", settings.tank_capacity);
+            
+            if (_needVersionCheck) {
+                _needVersionCheck = false;
+                if (strcmp(settings.fw_version, FW_VERSION_STR) != 0 && settings.fw_version[0] != '\0') {
+                    LOG_INFO(name, "OTA success: %s -> %s", settings.fw_version, FW_VERSION_STR);
+                    _pendingOtaSuccess = true;
+                    if (transportOnline) {
+                        _pendingOtaSuccess = false;
+                        outDoc.clear();
+                        outDoc["ota_success"] = true;
+                        outDoc["version"] = FW_VERSION_STR;
+                        sendJson();
+                    }
+                }
+                strncpy(settings.fw_version, FW_VERSION_STR, sizeof(settings.fw_version));
+                publish(Topic::STORAGE, &settings, sizeof(SettingsPack));
+            }
             break;
     }
 }
@@ -1832,6 +1974,15 @@ void Protocol::onData(uint16_t topic, const void* data) {
  * Вызывает sendTelemetry() для отправки данных, если разрешено.
  */
 void Protocol::onProcess() {
+    if (_pendingOtaSuccess && transportOnline) {
+        LOG_INFO(name, "Sending OTA success...");
+        _pendingOtaSuccess = false;
+        outDoc.clear();
+        outDoc["ota_success"] = true;
+        outDoc["version"] = FW_VERSION_STR;
+        sendJson();
+    }
+    
     sendTelemetry();
 }
 
@@ -1916,6 +2067,7 @@ void Protocol::processIncoming(const char* json) {
             if (fwSize > 0) {
                 LOG_INFO(name, "OTA update: size=%d", fwSize);
                 telemetryActive = false;  // останавливаем телеметрию
+                otaFirmwareSize = fwSize;
                 
                 // Отправляем команду OTA-модулю
                 CommandMsg c = {CMD_OTA_UPDATE, (float)fwSize};
@@ -2287,11 +2439,13 @@ private:
 
     // === Обновление прошивки ===
     int otaFirmwareSize = 0;
+    bool _pendingOtaSuccess = false;
+    bool _needVersionCheck = false;
 
     // === JSON-документы ===
     #pragma GCC diagnostic push
     #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-    StaticJsonDocument<512> inDoc;  ///< Входящий JSON
+    StaticJsonDocument<768> inDoc;  ///< Входящий JSON
     StaticJsonDocument<512> outDoc; ///< Исходящий JSON
     #pragma GCC diagnostic pop
 
@@ -2569,8 +2723,12 @@ private:
 #include "storage.h"
 #include "core/message.h"
 #include "core/logging.h"
+#include "core/version.h"
 #include <cstring>
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 #include <ArduinoJson.h>
+#pragma GCC diagnostic pop
 
 bool Storage::onInit() {
     subscribeNew(Topic::CALCULATOR, sizeof(TripPack));
@@ -2584,18 +2742,6 @@ void Storage::onCommand(const CommandMsg& cmd) {
 }
 
 void Storage::onData(uint16_t topic, const void* data) {
-
-    if (topic == Topic::STORAGE) {
-        const SettingsPack* p = (const SettingsPack*)data;
-        if (memcmp(&savedSettings, p, sizeof(SettingsPack)) != 0) {
-            memcpy(&savedSettings, p, sizeof(SettingsPack));
-            saveSettings();
-            LOG_INFO(name, "Settings saved: tank=%.1f", p->tank_capacity);
-            // Публикуем обновлённые настройки для всех
-            publish(Topic::STORAGE, p, sizeof(SettingsPack));
-        }
-    }
-
     if (topic == Topic::CALCULATOR) {
         const TripPack* p = (const TripPack*)data;
         
@@ -2611,12 +2757,20 @@ void Storage::onData(uint16_t topic, const void* data) {
         if (tripChanged) {
             memcpy(&savedTrip, p, sizeof(TripPack));
             saveTrip();
-            //LOG_INFO(name, "Trip saved: ODO=%.0f, fuel=%.1f", p->odo, p->fuel_level);
+            LOG_INFO(name, "Trip saved: ODO=%.0f, fuel=%.1f", p->odo, p->fuel_level);
         }
         
         if (fabsf(savedSettings.fuel_level - p->fuel_level) > 0.1f) {
             savedSettings.fuel_level = p->fuel_level;
             settingsDirty = true;
+        }
+    }
+    else if (topic == Topic::STORAGE) {
+        const SettingsPack* p = (const SettingsPack*)data;
+        if (memcmp(&savedSettings, p, sizeof(SettingsPack)) != 0) {
+            memcpy(&savedSettings, p, sizeof(SettingsPack));
+            settingsDirty = true;
+            LOG_INFO(name, "Settings received, marking dirty");
         }
     }
 }
@@ -2633,24 +2787,50 @@ void Storage::onProcess() {
 void Storage::loadAndPublish() {
     prefs.begin("bkc_v2", false);
     
+    // --- TripPack (бинарный) ---
     TripPack trip;
     memset(&trip, 0, sizeof(trip));
-    if (prefs.getBytes("trip", &trip, sizeof(trip)) != sizeof(TripPack)) {
+    size_t len = prefs.getBytes("trip", &trip, sizeof(trip));
+    if (len != sizeof(TripPack) || trip.version < 1 || trip.version > 2) {
         trip.version = 2;
         trip.fuel_level = 60;
+        LOG_INFO(name, "TripPack: defaults");
+    } else {
+        LOG_INFO(name, "Loaded: ODO=%.0f, fuel=%.1f", trip.odo, trip.fuel_level);
     }
     memcpy(&savedTrip, &trip, sizeof(trip));
-    LOG_INFO(name, "Loaded: ODO=%.0f, fuel=%.1f", trip.odo, trip.fuel_level);
     
+    // --- SettingsPack (JSON) ---
     SettingsPack cfg;
     memset(&cfg, 0, sizeof(cfg));
-    if (prefs.getBytes("settings", &cfg, sizeof(cfg)) != sizeof(SettingsPack)) {
-        cfg.version = 1;
-        cfg.tank_capacity = 60;
-        cfg.fuel_level = 0;
-        cfg.injector_count = 4;
-        cfg.injector_flow = 250;
-        cfg.pulses_per_meter = 3;
+    cfg.tank_capacity = 60;
+    cfg.injector_count = 4;
+    cfg.injector_flow = 250;
+    cfg.pulses_per_meter = 3;
+    
+    String jsonStr = prefs.getString("settings", "");
+    if (jsonStr.length() > 0) {
+        #pragma GCC diagnostic push
+        #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+        StaticJsonDocument<256> doc;
+        #pragma GCC diagnostic pop
+        DeserializationError err = deserializeJson(doc, jsonStr);
+        if (!err) {
+            cfg.tank_capacity    = doc["tV"]    | cfg.tank_capacity;
+            cfg.fuel_level       = doc["fuel"]  | cfg.fuel_level;
+            cfg.injector_count   = doc["iCnt"]  | cfg.injector_count;
+            cfg.injector_flow    = doc["iPerf"] | cfg.injector_flow;
+            cfg.pulses_per_meter = doc["sSig"]  | cfg.pulses_per_meter;
+            cfg.kline_protocol   = doc["kPrt"]  | cfg.kline_protocol;
+            if (doc["fw"].is<const char*>()) {
+                strncpy(cfg.fw_version, doc["fw"], sizeof(cfg.fw_version) - 1);
+            }
+            LOG_INFO(name, "Settings loaded: tank=%.1f", cfg.tank_capacity);
+        } else {
+            LOG_INFO(name, "Settings JSON parse error, using defaults");
+        }
+    } else {
+        LOG_INFO(name, "Settings: defaults");
     }
     memcpy(&savedSettings, &cfg, sizeof(cfg));
     
@@ -2667,27 +2847,43 @@ void Storage::saveTrip() {
 }
 
 void Storage::saveSettings() {
+    #pragma GCC diagnostic push
+    #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+    StaticJsonDocument<256> doc;
+    #pragma GCC diagnostic pop
+    doc["tV"]    = savedSettings.tank_capacity;
+    doc["fuel"]  = savedSettings.fuel_level;
+    doc["iCnt"]  = savedSettings.injector_count;
+    doc["iPerf"] = savedSettings.injector_flow;
+    doc["sSig"]  = savedSettings.pulses_per_meter;
+    doc["kPrt"]  = savedSettings.kline_protocol;
+    doc["fw"] = savedSettings.fw_version[0] ? savedSettings.fw_version : FW_VERSION_STR;
+    
+    String jsonStr;
+    serializeJson(doc, jsonStr);
+    
     prefs.begin("bkc_v2", false);
-    prefs.putBytes("settings", &savedSettings, sizeof(SettingsPack));
+    prefs.putString("settings", jsonStr);
     prefs.end();
+    
+    LOG_INFO(name, "Settings saved: %s", jsonStr.c_str());
 }
 
 void Storage::handleGetCfg(int msgId) {
     char buf[256];
     int len = snprintf(buf, sizeof(buf),
-        "{\"msg_id\":%d,\"cfg\":{\"tV\":%.1f,\"iPerf\":%.1f,\"iCnt\":%d,\"sSig\":%.3f,\"kPrt\":%d,\"fw\":\"1.0\"}}",
+        "{\"msg_id\":%d,\"cfg\":{\"tV\":%.1f,\"iPerf\":%.1f,\"iCnt\":%d,\"sSig\":%.3f,\"kPrt\":%d,\"fw\":\"%s\"}}",
         msgId, savedSettings.tank_capacity, savedSettings.injector_flow,
-        savedSettings.injector_count, savedSettings.pulses_per_meter, savedSettings.kline_protocol);
+        savedSettings.injector_count, savedSettings.pulses_per_meter, savedSettings.kline_protocol,
+        savedSettings.fw_version[0] ? savedSettings.fw_version : FW_VERSION_STR);
     publish(Topic::PROTOCOL, buf, len + 1);
 }
 
 void Storage::handleSetCfg(const char* json) {
-    // Парсим через ArduinoJson — он уже есть в проекте
     #pragma GCC diagnostic push
     #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
     StaticJsonDocument<256> doc;
     #pragma GCC diagnostic pop
-
     DeserializationError err = deserializeJson(doc, json);
     if (err) return;
     
@@ -2705,7 +2901,7 @@ void Storage::handleSetCfg(const char* json) {
     settingsDirty = false;
     publish(Topic::STORAGE, &savedSettings, sizeof(SettingsPack));
     
-    
+    LOG_INFO(name, "Config updated: tank=%.1f", savedSettings.tank_capacity);
 }
 // END src/modules/storage.cpp
 
@@ -2871,78 +3067,253 @@ private:
 
 // START src/modules/transport.cpp
 // ======================================================================
+/**
+ * @file transport.cpp
+ * @brief Реализация модуля Bluetooth-транспорта.
+ * 
+ * Содержит реализацию методов класса Transport для управления
+ * Bluetooth-соединением, приема и передачи данных. Обеспечивает
+ * двунаправленную связь между устройством и внешним клиентом.
+ */
+
 #include <Arduino.h>
 #include "transport.h"
 #include "core/message.h"
 #include "core/logging.h"
 #include "core/command_msg.h"
 
+/**
+ * @brief Инициализация модуля Bluetooth-транспорта.
+ * 
+ * Выполняет начальную настройку модуля при старте системы:
+ * - Настраивает GPIO для светодиода подключения как выход
+ * - Устанавливает начальное состояние светодиода (выключен)
+ * - Инициализирует Bluetooth-серийный порт с именем "TripComputer"
+ * - Подписывается на топик Topic::PROTOCOL для отправки исходящих данных
+ * - Инициализирует буфер приема (обнуление и установка длины)
+ * 
+ * При неудачной инициализации Bluetooth записывает ошибку в лог
+ * и возвращает false.
+ * 
+ * @return true при успешной инициализации, false при ошибке инициализации Bluetooth
+ */
 bool Transport::onInit() {
+    // Настраиваем GPIO пин светодиода подключения как выход
     pinMode(LED_BUILTIN, OUTPUT);
+    
+    // Устанавливаем начальное состояние светодиода - выключен
     digitalWrite(LED_BUILTIN, LOW);
     
+    // Инициализируем Bluetooth-серийный порт с именем "TripComputer"
+    // Это имя будет отображаться при поиске Bluetooth-устройств
     if (!btSerial.begin("TripComputer")) {
+        // Если инициализация Bluetooth не удалась, записываем ошибку в лог
         LOG_ERROR(name, "BT init failed");
+        // Возвращаем false для сигнализации неудачной инициализации
         return false;
     }
+    
+    // При успешной инициализации записываем информационное сообщение в лог
     LOG_INFO(name, "BT started");
     
-    // Подписка на исходящие сообщения — будут приходить через onData()
+    // Подписываемся на топик Topic::PROTOCOL для получения исходящих сообщений
+    // Указываем размер буфера 512 байта, что достаточно для полного JSON-сообщения
     subscribeNew(Topic::PROTOCOL, 512);
     
+    // Инициализируем длину буфера приема нулем
     rxLen = 0;
+    
+    // Обнуляем буфер приема, очищая его содержимое
     memset(rxBuffer, 0, RX_BUF_SIZE);
+    
+    // Возвращаем true, сигнализируя об успешной инициализации модуля
     return true;
 }
 
+/**
+ * @brief Обработка исходящих данных.
+ * 
+ * Вызывается при получении данных в топик Topic::PROTOCOL,
+ * на который модуль подписан. Передает содержимое сообщения
+ * в Bluetooth-соединение посимвольно.
+ * 
+ * Формат передачи:
+ * - Сначала передаются все байты сообщения
+ * - Затем передается символ новой строки ('\n')
+ * 
+ * Используется для отправки ответов, телеметрии и уведомлений
+ * клиентскому приложению.
+ * 
+ * @param topic Идентификатор топика, из которого получены данные
+ * @param data Указатель на данные (строка)
+ */
 void Transport::onData(uint16_t topic, const void* data) {
+    // Проверяем, является ли топик Topic::PROTOCOL источником данных
+    // Это обеспечивает фильтрацию сообщений и обработку только нужных данных
     if (topic == Topic::PROTOCOL) {
+        // Преобразуем указатель на данные в строку (char*)
+        // Это позволяет работать с данными как с текстом
         const char* msg = (const char*)data;
+        
+        // Записываем содержимое сообщения в Bluetooth-соединение
+        // Передаем указатель на данные и их длину
         btSerial.write((uint8_t*)msg, strlen(msg));
+        
+        // Добавляем символ новой строки в конец сообщения
+        // Это необходимо для корректного разделения сообщений на стороне получателя
+        // и обеспечивает совместимость с текстовыми протоколами
         btSerial.write('\n');
     }
 }
 
+/**
+ * @brief Периодическая обработка фоновых задач.
+ * 
+ * Вызывается регулярно из основного цикла приложения для выполнения
+ * фоновых операций, необходимых для поддержания соединения:
+ * - Проверка состояния подключения (checkConnection)
+ * - Чтение входящих данных (readBluetooth)
+ * 
+ * Не имеет возвратного значения, так как ошибки обрабатываются
+ * внутри вызываемых методов и записываются в лог.
+ */
 void Transport::onProcess() {
+    // Проверяем текущее состояние Bluetooth-подключения
+    // Метод проверяет наличие подключенного клиента и обновляет состояние
+    // светодиода, записывает лог и публикует команду о состоянии подключения
     checkConnection();
+    
+    // Читаем входящие данные из Bluetooth-соединения
+    // Метод посимвольно считывает данные в буфер и при получении полного
+    // сообщения (до символа '\n') передает его на обработку в processLine()
     readBluetooth();
 }
 
+/**
+ * @brief Проверка состояния Bluetooth-подключения.
+ * 
+ * Проверяет, подключен ли клиент к Bluetooth-серверу и изменилось ли
+ * состояние подключения с момента последней проверки. При изменении состояния:
+ * - Обновляет состояние светодиода подключения
+ * - Записывает информацию о подключении в лог
+ * - Публикует команду CMD_TRANSPORT_STATUS в топик Topic::SYSTEM
+ *   для уведомления других модулей о состоянии соединения
+ * 
+ * Метод обеспечивает синхронизацию состояния подключения между
+ * физическим устройством, пользовательским интерфейсом и логикой приложения.
+ */
 void Transport::checkConnection() {
+    // Проверяем наличие подключенного клиента к Bluetooth-серверу
+    // Метод hasClient() возвращает true, если есть активное соединение
     bool now = btSerial.hasClient();
+    
+    // Проверяем, изменилось ли состояние подключения по сравнению с предыдущей проверкой
+    // Это позволяет выполнять действия только при изменении состояния (подключение/отключение)
     if (now != connected) {
+        // Обновляем внутреннее состояние подключения
         connected = now;
+        
+        // Устанавливаем состояние светодиода подключения в соответствии с состоянием соединения
+        // Если подключен - светодиод включен (HIGH), если нет - выключен (LOW)
         digitalWrite(LED_BUILTIN, connected ? HIGH : LOW);
+        
+        // Записываем информацию о состоянии подключения в системный лог
+        // Это помогает при отладке и мониторинге состояния Bluetooth
         LOG_INFO(name, "BT %s", connected ? "CONNECTED" : "DISCONNECTED");
+        
+        // Создаем команду с информацией о состоянии подключения
+        // Команда содержит код CMD_TRANSPORT_STATUS и значение 1.0f (подключен) или 0.0f (отключен)
         CommandMsg cmd = {CMD_TRANSPORT_STATUS, connected ? 1.0f : 0.0f};
+        
+        // Публикуем команду в топик Topic::SYSTEM
+        // Это позволяет другим модулям системы реагировать на изменение состояния подключения
+        // Например, модуль UI может обновить отображение статуса подключения
         publish(Topic::SYSTEM, &cmd, sizeof(cmd));
     }
 }
 
+/**
+ * @brief Чтение данных из Bluetooth-соединения.
+ * 
+ * Проверяет наличие входящих данных и посимвольно считывает их
+ * в буфер rxBuffer. Обрабатывает данные по следующему алгоритму:
+ * - Игнорирует символы возврата каретки ('\r')
+ * - Добавляет все остальные символы в буфер
+ * - При получении символа новой строки ('\n') обрабатывает полное сообщение
+ * - При переполнении буфера записывает ошибку в лог и сбрасывает буфер
+ * 
+ * Метод обеспечивает надежный прием сообщений, разделяемых символом '\n',
+ * и защиту от переполнения буфера.
+ */
 void Transport::readBluetooth() {
+    // Проверяем, есть ли активное подключение
+    // Если нет подключенного клиента, выходим из функции
+    // Это предотвращает попытки чтения данных без подключения
     if (!connected) return;
     
+    // Цикл чтения доступных данных из Bluetooth-порта
+    // Условия продолжения цикла:
+    // - Есть доступные для чтения данные (btSerial.available())
+    // - Длина буфера приема меньше максимального размера минус 1 (rxLen < RX_BUF_SIZE - 1)
+    // Минус 1 оставляет место для нулевого символа завершения строки
     while (btSerial.available() && rxLen < RX_BUF_SIZE - 1) {
+        // Считываем один байт из Bluetooth-порта
         char c = btSerial.read();
+        
+        // Игнорируем символ возврата каретки ('\r')
+        // Это необходимо для правильной обработки окончания строки,
+        // так как различные системы используют разные комбинации символов
+        // для обозначения новой строки (\n, \r\n, \r)
         if (c == '\r') continue;
         
+        // Добавляем считанный символ в буфер приема
+        // Увеличиваем счетчик длины буфера после добавления символа
         rxBuffer[rxLen++] = c;
         
+        // Проверяем, является ли символ концом строки ('\n')
+        // Это определяет момент завершения полного сообщения
         if (c == '\n') {
+            // Заменяем символ новой строки на нулевой символ для завершения строки
+            // Это позволяет обрабатывать сообщение как C-строку
             rxBuffer[rxLen - 1] = '\0';
+            
+            // Уменьшаем счетчик длины буфера, так как символ '\n' заменен на '\0'
             rxLen--;
+            
+            // Проверяем, что в буфере есть данные для обработки
+            // Это предотвращает обработку пустых сообщений
             if (rxLen > 0) processLine();
+            
+            // Сбрасываем счетчик длины буфера для приема нового сообщения
             rxLen = 0;
         }
         
+        // Проверяем переполнение буфера приема
+        // Если длина буфера достигла максимального размера минус 1
         if (rxLen >= RX_BUF_SIZE - 1) {
+            // Записываем ошибку в системный лог
+            // Это помогает при отладке проблемы с переполнением буфера
             LOG_ERROR(name, "RX overflow");
+            
+            // Сбрасываем счетчик длины буфера для предотвращения дальнейших проблем
             rxLen = 0;
         }
     }
 }
 
+/**
+ * @brief Обработка полного принятого сообщения.
+ * 
+ * Вызывается после получения полного сообщения (до символа '\n').
+ * Публикует содержимое сообщения в топик Topic::TRANSPORT для дальнейшей
+ * обработки другими модулями системы (например, Protocol).
+ * 
+ * Длина передаваемых данных включает завершающий нулевой байт,
+ * чтобы обеспечить корректную обработку строки в принимающем модуле.
+ */
 void Transport::processLine() {
+    // Публикуем содержимое принятого сообщения в топик Topic::TRANSPORT
+    // Это позволяет другим модулям системы (например, Protocol) получить и обработать сообщение
     publish(Topic::TRANSPORT, rxBuffer, strlen(rxBuffer) + 1);
 }
 // END src/modules/transport.cpp
@@ -2950,31 +3321,146 @@ void Transport::processLine() {
 
 // START src/modules/transport.h
 // ======================================================================
+/**
+ * @file transport.h
+ * @brief Модуль управления Bluetooth-соединением.
+ * 
+ * Класс Transport обеспечивает двунаправленную связь по Bluetooth с внешними
+ * устройствами (смартфон, компьютер). Отвечает за:
+ * - Установление и отслеживание соединения
+ * - Прием данных от подключенного устройства
+ * - Передачу данных в подключенное устройство
+ * - Преобразование данных между внутренними топиками и Bluetooth-протоколом
+ * 
+ * Использует класс BluetoothSerial из Arduino-ESP32 для реализации SPP-протокола.
+ * Управляет светодиодом подключения (LED_BUILTIN).
+ */
+
 #ifndef TRANSPORT_H
 #define TRANSPORT_H
 
 #include "core/module.h"
 #include <BluetoothSerial.h>
 
+/**
+ * @class Transport
+ * @brief Модуль Bluetooth-транспорта для обмена данными.
+ * 
+ * Реализует двунаправленный обмен данными по Bluetooth. Принимает команды
+ * и данные от подключенного устройства и передает ответы и телеметрию обратно.
+ * Управляет состоянием соединения и сигнализирует о нем через светодиод.
+ */
 class Transport : public Module {
 public:
+    /**
+     * @brief Конструктор модуля.
+     * 
+     * Инициализирует базовый класс с именем "Transport" и устанавливает
+     * начальные значения для переменных состояния.
+     */
     Transport() : Module("Transport"), connected(false), rxLen(0) {}
-    
+
 protected:
+    /**
+     * @brief Инициализация модуля Bluetooth.
+     * 
+     * Выполняет начальную настройку:
+     * - Настраивает GPIO для светодиода подключения
+     * - Инициализирует Bluetooth-серию с именем "TripComputer"
+     * - Подписывается на топик Topic::PROTOCOL для отправки данных
+     * - Инициализирует буфер приема
+     * 
+     * @return true при успешной инициализации Bluetooth, false при ошибке
+     */
     bool onInit() override;
+
+    /**
+     * @brief Периодическая обработка соединения.
+     * 
+     * Вызывается регулярно для выполнения фоновых задач:
+     * - Проверка состояния подключения
+     * - Чтение данных из Bluetooth
+     */
     void onProcess() override;
+
+    /**
+     * @brief Обработка входящих данных.
+     * 
+     * Вызывается при получении данных в топик, на который модуль подписан.
+     * В данном случае обрабатывает данные из топика Topic::PROTOCOL и
+     * пересылает их в Bluetooth-соединение.
+     * 
+     * @param topic Идентификатор топика, из которого получены данные
+     * @param data Указатель на данные
+     */
     void onData(uint16_t topic, const void* data) override;
-    
+
 private:
+    /**
+     * @brief Экземпляр Bluetooth-серии для SPP-соединения.
+     * 
+     * Предоставляет интерфейс для работы с Bluetooth Serial Protocol.
+     */
     BluetoothSerial btSerial;
+
+    /**
+     * @brief Флаг текущего состояния подключения.
+     * 
+     * true - есть подключенный клиент, false - нет подключения.
+     */
     bool connected;
-    
+
+    /**
+     * @brief Максимальный размер буфера приема.
+     * 
+     * Определяет максимальное количество байт, которые могут быть приняты
+     * за одну сессию. Достаточно для полного JSON-сообщения.
+     */
     static constexpr size_t RX_BUF_SIZE = 512;
+
+    /**
+     * @brief Буфер для приема данных по Bluetooth.
+     * 
+     * Хранит входящие байты до обработки полного сообщения.
+     */
     char rxBuffer[RX_BUF_SIZE];
+
+
+    /**
+     * @brief Текущая длина данных в буфере приема.
+     * 
+     * Указывает, сколько байт в данный момент находится в rxBuffer.
+     */
     uint16_t rxLen;
-    
+
+    /**
+     * @brief Проверка состояния подключения.
+     * 
+     * Проверяет, изменилось ли состояние подключения по сравнению
+     * с предыдущей проверкой. При изменении состояния:
+     * - Обновляет светодиод подключения
+     * - Записывает состояние в лог
+     * - Публикует команду CMD_TRANSPORT_STATUS в шину сообщений
+     */
     void checkConnection();
+
+    /**
+     * @brief Чтение данных из Bluetooth.
+     * 
+     * Проверяет наличие входящих данных и посимвольно считывает их
+     * в буфер rxBuffer. При получении символа конца строки ('\n')
+     * вызывает processLine() для обработки полного сообщения.
+     * Обрабатывает переполнение буфера.
+     */
     void readBluetooth();
+
+    /**
+     * @brief Обработка полного принятого сообщения.
+     * 
+     * Вызывается после получения полного сообщения (до '\n').
+     * Публикует содержимое сообщения в топик Topic::TRANSPORT
+     * для дальнейшей обработки другими модулями.
+     */
     void processLine();
 };
 
@@ -2994,6 +3480,7 @@ private:
 
 #include "router.h"
 #include "core/logging.h"
+#include "core/message.h" 
 
 /**
  * @brief Инициализация шины сообщений.
@@ -3053,17 +3540,21 @@ void Router::subscribe(Module* module, uint16_t topic, QueueHandle_t queue,
 void Router::publish(uint16_t topic, const void* data, size_t size) {
     int idx = topicIndex(topic);
     if (idx < 0 || idx >= 16) return;
-
+    
     TopicEntry& te = _topics[idx];
-
-    // Сохраняем копию данных (retain), если помещается
+    
     if (size <= ROUTER_RETAIN_SIZE) {
         memcpy(te.retainData, data, size);
         te.retainSize = size;
         te.retainValid = true;
     }
-
-    // Отправляем всем подписчикам
+    
+    // ЛОГ для SYSTEM
+    if (topic == Topic::SYSTEM) {
+        const CommandMsg* c = (const CommandMsg*)data;
+        LOG_DEBUG("ROUTER", "Pub SYSTEM: cmd=0x%02X, val=%.0f, subs=%d", c->cmd, c->value, te.count);
+    }
+    
     for (uint8_t i = 0; i < te.count; i++) {
         if (!te.subs[i].queue) continue;
         if (te.subs[i].depth == 1)
@@ -3121,7 +3612,7 @@ int Router::topicIndex(uint16_t topic) {
  * @def ROUTER_MAX_SUBS
  * @brief Максимальное количество подписчиков на один топик.
  */
-#define ROUTER_MAX_SUBS 6
+#define ROUTER_MAX_SUBS 16
 
 /**
  * @def ROUTER_RETAIN_SIZE

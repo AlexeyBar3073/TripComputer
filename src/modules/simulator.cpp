@@ -1,7 +1,14 @@
 #include "simulator.h"
 #include "core/message.h"
 #include "core/logging.h"
+#include <math.h>
 
+/**
+ * @brief Инициализация симулятора.
+ * 
+ * Настраивает пины кнопок и потенциометра, калибрует педаль газа.
+ * Использует vTaskDelay вместо delay() чтобы не блокировать планировщик.
+ */
 bool Simulator::onInit() {
     memset(&pack, 0, sizeof(pack));
     pack.version = 3; pack.voltage = 12.7f; pack.not_fuel = true;
@@ -14,11 +21,12 @@ bool Simulator::onInit() {
     analogReadResolution(12);
     analogSetAttenuation(ADC_11db);
     
+    // Калибровка педали газа
     int sum = 0, minV = 4095, maxV = 0;
     for (int i = 0; i < 20; i++) {
         int v = analogRead(PIN_POT);
         sum += v; if (v < minV) minV = v; if (v > maxV) maxV = v;
-        delay(2);
+        vTaskDelay(pdMS_TO_TICKS(2));  // неблокирующая задержка
     }
     pedalConnected = (maxV - minV < 200 && sum / 20 < 4000);
     throttle = pedalConnected ? 0 : 0.3f;
@@ -135,7 +143,7 @@ void Simulator::onProcess() {
         pack.instant_fuel = getInstantFuel();
         pack.distance = distance;
         pack.fuel_used = fuelUsed;
-        pack.fuel_level_sensor = max(0.0f, fuelBase - fuelUsed);
+        pack.fuel_level_sensor = fmaxf(0.0f, fuelBase - fuelUsed);
         
         static int lc = 0; lc++;
         if (lc % 500 == 0) {

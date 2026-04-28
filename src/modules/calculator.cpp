@@ -9,6 +9,7 @@
 #include "calculator.h"
 #include "core/message.h"
 #include "core/logging.h"
+#include <math.h>
 
 /**
  * @brief Инициализация модуля Calculator.
@@ -113,7 +114,7 @@ void Calculator::onData(uint16_t topic, const void* data) {
                 pack.fuel_trip_b     = fuelBBase + curFuel;
                 pack.trip_cur        = curDist;
                 pack.fuel_cur        = curFuel;
-                pack.fuel_level      = notFuel ? max(0.0f, fuelBase - curFuel) : 0;
+                pack.fuel_level      = notFuel ? fmaxf(0.0f, fuelBase - curFuel) : 0;
                 pack.avg_consumption = (curDist > 0.001f) ? (curFuel / curDist) * 100.0f : 0;
                 pack.avg_total       = avgTotal;
                 publish(Topic::CALCULATOR, &pack, sizeof(pack));
@@ -191,7 +192,7 @@ void Calculator::onProcess() {
         pack.fuel_trip_b     = fuelBBase + curFuel;
         pack.trip_cur        = curDist;
         pack.fuel_cur        = curFuel;
-        pack.fuel_level      = notFuel ? max(0.0f, fuelBase - curFuel) : 0;
+        pack.fuel_level      = notFuel ? fmaxf(0.0f, fuelBase - curFuel) : 0;
         pack.avg_consumption = (curDist > 0.001f) ? (curFuel / curDist) * 100.0f : 0;
         avgCur = pack.avg_consumption;
         pack.avg_total       = avgTotal;

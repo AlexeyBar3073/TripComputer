@@ -1,113 +1,50 @@
-/**
- * @file protocol.h
- * @brief Модуль обработки JSON-протокола обмена данными.
- * 
- * Класс Protocol реализует двусторонний JSON-протокол для:
- * - Приёма и разбора команд от клиента
- * - Формирования и отправки телеметрии
- * - Обработки запросов настроек
- * 
- * Работает как мост между транспортом (Bluetooth) и внутренней шиной.
- */
-
 #ifndef PROTOCOL_H
 #define PROTOCOL_H
 
 #include "core/module.h"
 #include "core/packets.h"
 
-/**
- * Подавление предупреждения о deprecated-методах ArduinoJson
- * (используем V6 API для совместимости)
- */
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 #include <ArduinoJson.h>
 #pragma GCC diagnostic pop
 
 /**
- * @class Protocol
- * @brief Модуль JSON-протокола обмена данными.
+ * @brief Модуль JSON-протокола — «бюрократ» системы.
  * 
- * Обрабатывает входящие JSON-команды и формирует ответы.
- * Управляет потоком телеметрии по требованию.
+ * Принимает входящие JSON-команды от Transport, парсит их,
+ * выполняет свою часть работы, остальные команды передаёт в шину.
+ * Формирует исходящие JSON-ответы и фракционную телеметрию.
  */
 class Protocol : public Module {
 public:
-    /**
-     * @brief Конструктор модуля.
-     * 
-     * Устанавливает имя "Protocol" и инициализирует флаги состояния.
-     */
     Protocol() : Module("Protocol")
         , engineOk(false), tripOk(false), klineOk(false), climateOk(false), settingsOk(false)
-        , settingsChanged(false)
         , telemetryActive(false), transportOnline(false)
         , lastTelemetryMs(0), telemetryCounter(0) {}
 
 protected:
-    /**
-     * @brief Инициализация модуля.
-     * 
-     * Подписывается на несколько топиков для сбора данных:
-     * - Topic::TRANSPORT  — входящие JSON-команды
-     * - Topic::SENSOR     — данные с датчиков
-     * - Topic::CALCULATOR — данные о поездке
-     * - Topic::KLINE      — данные K-Line
-     * - Topic::SERVICE    — данные климат-системы
-     * - Topic::STORAGE    — настройки
-     * 
-     * @return true — всегда успешна
-     */
     bool onInit() override;
-
-    /**
-     * @brief Периодическая отправка телеметрии.
-     * 
-     * Если телеметрия активна и транспорт онлайн — отправляет
-     * пакет данных каждые 150 мс.
-     */
     void onProcess() override;
-
-    /**
-     * @brief Обработка команд.
-     * 
-     * Реагирует на CMD_TRANSPORT_STATUS — изменение состояния подключения.
-     * 
-     * @param cmd Команда от системы
-     */
     void onCommand(const CommandMsg& cmd) override;
-
-    /**
-     * @brief Обработка входящих данных.
-     * 
-     * Собирает данные из всех топиков для формирования телеметрии.
-     * 
-     * @param topic Идентификатор топика
-     * @param data  Указатель на данные
-     */
     void onData(uint16_t topic, const void* data) override;
 
 private:
-    // === Кэш данных ===
-    EnginePack  engine;     ///< Последние данные с датчиков
-    TripPack    trip;       ///< Последние данные о поездке
-    KlinePack   kline;      ///< Последние данные K-Line
-    ClimatePack climate;    ///< Последние данные климат-системы
-    SettingsPack settings;  ///< Последние настройки
+    // === Кэш данных для телеметрии ===
+    EnginePack  engine;     bool engineOk;
+    TripPack    trip;       bool tripOk;
+    KlinePack   kline;      bool klineOk;
+    ClimatePack climate;    bool climateOk;
+    SettingsPack settings;  bool settingsOk;
 
-    // === Флаги состояния ===
-    bool engineOk, tripOk, klineOk, climateOk, settingsOk; ///< Флаги: данные загружены
-    bool settingsChanged;   ///< Флаг: настройки изменены, нужно отправить
+    // === Телеметрия ===
+    bool telemetryActive;
+    bool transportOnline;
+    unsigned long lastTelemetryMs;
+    int telemetryCounter;
+    bool firstTelemetry = true;
 
-    // === Управление телеметрией ===
-    bool telemetryActive;   ///< Флаг: телеметрия активна
-    bool transportOnline;   ///< Флаг: Bluetooth подключён
-    unsigned long lastTelemetryMs; ///< Время последней отправки телеметрии
-    int telemetryCounter;   ///< Счётчик пакетов телеметрии
-    bool firstTelemetry;    ///< Флаг: первая отправка (все поля)
-
-    // === Обновление прошивки ===
+    // === OTA ===
     int otaFirmwareSize = 0;
     bool _pendingOtaSuccess = false;
     bool _needVersionCheck = false;
@@ -115,70 +52,25 @@ private:
     // === JSON-документы ===
     #pragma GCC diagnostic push
     #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-    StaticJsonDocument<768> inDoc;  ///< Входящий JSON
-    StaticJsonDocument<512> outDoc; ///< Исходящий JSON
+    StaticJsonDocument<768> inDoc;
+    StaticJsonDocument<512> outDoc;
     #pragma GCC diagnostic pop
 
-    // === Внутренние методы ===
-    
-    /**
-     * @brief Обработка входящей JSON-команды.
-     * 
-     * Разбирает JSON, определяет команду и выполняет соответствующее действие.
-     * 
-     * @param json Указатель на строку с JSON
-     */
+    // --- Диспетчер команд ---
     void processIncoming(const char* json);
 
-    /**
-     * @brief Формирование ответа на get_cfg.
-     * 
-     * Заполняет outDoc полями из settings или значениями по умолчанию.
-     */
-    void buildCfgResponse();
+    // --- Обработчики сложных команд ---
+    void cmdSetCfg(const char* rawJson);
+    void cmdOtaUpdate();
+    void cmdOtaData();
 
-    /**
-     * @brief Обработка команды set_cfg.
-     * 
-     * Обновляет локальные настройки из поля "data" входящего JSON.
-     */
-    void handleSetCfg();
-
-    /**
-     * @brief Отправка телеметрии.
-     * 
-     * Формирует и отправляет пакет телеметрии, если разрешено.
-     */
+    // --- Телеметрия ---
     void sendTelemetry();
-
-    /**
-     * @brief Формирование базового пакета телеметрии.
-     * 
-     * Заполняет поля, обновляемые каждые 150 мс.
-     */
     void buildFastJson();
-
-    /**
-     * @brief Добавление полей поездки.
-     * 
-     * Добавляет поля trip_a, fuel_a, avg и др. — обновляется каждые 600 мс.
-     */
     void addTripFields();
-
-    /**
-     * @brief Добавление сервисных полей.
-     * 
-     * Добавляет поля coolant_temp, dtc, tire и др. — обновляется каждые 1.5 с.
-     */
     void addServiceFields();
 
-    /**
-     * @brief Отправка JSON-пакета.
-     * 
-     * Сериализует outDoc и публикует в Topic::PROTOCOL.
-     * 
-     * @return true при успехе, false при ошибке
-     */
+    // --- Отправка ---
     bool sendJson();
 };
 
