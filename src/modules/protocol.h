@@ -46,8 +46,7 @@ private:
 
     // === OTA ===
     int otaFirmwareSize = 0;
-    bool _pendingOtaSuccess = false;
-    bool _needVersionCheck = false;
+    bool _pendingOtaUpdate = false;
 
     // === JSON-документы ===
     #pragma GCC diagnostic push

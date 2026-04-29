@@ -23,16 +23,26 @@
  * @return true при успехе, false при ошибке (например, не создана очередь)
  */
 bool Module::init(Router* router) {
+    // Сохранение ссылки на центральную шину сообщений для последующего использования.
     _router = router;
 
+    // Создание очереди FreeRTOS для приема команд.
+    // Очередь имеет глубину 5 элементов, каждый размером с структуру CommandMsg.
     _cmdQueue = xQueueCreate(5, sizeof(CommandMsg));
+    // Проверка, была ли очередь успешно создана.
     if (!_cmdQueue) {
+        // Если создание очереди не удалось, записываем ошибку в лог и возвращаем false.
         LOG_ERROR(name, "Cmd queue create failed");
         return false;
     }
 
+    // Подписка модуля на топик Topic::SYSTEM.
+    // Это означает, что модуль будет получать все команды, отправленные в шину.
+    // Глубина очереди 5 означает режим SEND (очередь).
     _router->subscribe(this, Topic::SYSTEM, _cmdQueue, sizeof(CommandMsg), 5);
 
+    // Вызов виртуального метода onInit(), который должен быть реализован в каждом наследнике.
+    // Например, в этом методе модуль может подписаться на свои собственные топики.
     return onInit();
 }
 
@@ -47,20 +57,29 @@ bool Module::init(Router* router) {
  * Используется для предотвращения блокировок и обеспечения предсказуемого поведения.
  */
 void Module::process() {
-    // 1. Сначала хук наследника (телеметрия, фоновая работа)
+    // 1. Вызов виртуального метода onProcess() для выполнения фоновой работы.
+    // Например, модуль Calculator может здесь обновлять текущий расход топлива.
     onProcess();
 
-    // 2. Потом команды
+    // 2. Обработка всех поступивших команд из очереди команд.
+    // Используется неблокирующий вызов xQueueReceive с тайма��том 0 (pdFALSE),
+    // поэтому цикл немедленно завершится, если очередь пуста.
     CommandMsg cmd;
     while (xQueueReceive(_cmdQueue, &cmd, 0) == pdTRUE) {
+        // Вызов виртуального метода onCommand() для обработки каждой команды.
         onCommand(cmd);
     }
 
-    // 3. Потом данные подписок
+    // 3. Обработка данных из всех подписанных топиков.
+    // Используется статический буфер для временного хранения данных, полученных из очереди.
     static uint8_t buf[512];
+    // Цикл по всем записям в локальном массиве подписок модуля.
     for (uint8_t i = 0; i < _subCount; i++) {
+        // Пропуск пустых записей (защита).
         if (!_subs[i].queue) continue;
+        // Неблокирующий прием данных из очереди подписки.
         if (xQueueReceive(_subs[i].queue, buf, 0) == pdTRUE) {
+            // Вызов виртуального метода onData(), передавая ему идентификатор топика и указатель на данные.
             onData(_subs[i].topic, buf);
         }
     }
@@ -78,12 +97,19 @@ void Module::process() {
  * @return true — успех, false — превышено количество подписок или нет Router
  */
 bool Module::subscribe(uint16_t topic, QueueHandle_t queue, size_t elemSize, uint8_t depth) {
+    // Проверка, не превышено ли максимальное количество подписок для модуля и инициализирован ли Router.
     if (_subCount >= MODULE_MAX_SUBS || !_router) return false;
+    
+    // Регистрация модуля в центральной шине сообщений (Router).
     _router->subscribe(this, topic, queue, elemSize, depth);
+    
+    // Добавление информации о подписке в локальный массив модуля для последующего управления.
     _subs[_subCount].topic = topic;
     _subs[_subCount].queue = queue;
     _subs[_subCount].depth = depth;
     _subCount++;
+    
+    // Возврат true при успешной подписке.
     return true;
 }
 
@@ -98,11 +124,16 @@ bool Module::subscribe(uint16_t topic, QueueHandle_t queue, size_t elemSize, uin
  * @return Указатель на очередь при успехе, nullptr при ошибке
  */
 QueueHandle_t Module::subscribeNew(uint16_t topic, size_t elemSize) {
+    // Создание новой очереди с глубиной 1. Такая очередь замещает старое значение при новой записи (OVERWRITE).
     QueueHandle_t q = xQueueCreate(1, elemSize);
+    // Попытка подписки с созданной очередью.
+    // Если subscribe вернет false (например, из-за переполнения), очередь будет удалена.
     if (!q || !subscribe(topic, q, elemSize, 1)) {
+        // Очистка ресурсов в случае ошибки.
         if (q) vQueueDelete(q);
         return nullptr;
     }
+    // Возврат указателя на успешно созданную и зарегистрированную очередь.
     return q;
 }
 
@@ -117,7 +148,12 @@ QueueHandle_t Module::subscribeNew(uint16_t topic, size_t elemSize) {
  * @return true — успех, false — не инициализирован Router
  */
 bool Module::publish(uint16_t topic, const void* data, size_t size) {
+    // Проверка, инициализирован ли Router.
     if (!_router) return false;
+    
+    // Делегирование публикации данных в Router.
     _router->publish(topic, data, size);
+    
+    // Возврат true, так как Router не возвращает ошибку.
     return true;
 }

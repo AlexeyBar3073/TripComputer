@@ -81,7 +81,6 @@ bool Protocol::onInit() {
     subscribeNew(Topic::STORAGE,    sizeof(SettingsPack));// Настройки устройства
 
     // При первом получении настроек проверим версию прошивки (OTA success)
-    _needVersionCheck = true;
     return true;
 }
 
@@ -96,15 +95,6 @@ void Protocol::onCommand(const CommandMsg& cmd) {
         case CMD_TRANSPORT_STATUS:
             transportOnline = (cmd.value != 0);
             LOG_INFO(name, "Transport %s", transportOnline ? "ONLINE" : "OFFLINE");
-            
-            // Если ожидается отправка ota_success — отправляем при подключении
-            if (transportOnline && _pendingOtaSuccess) {
-                _pendingOtaSuccess = false;
-                outDoc.clear();
-                outDoc["ota_success"] = true;
-                outDoc["version"] = FW_VERSION_STR;
-                sendJson();
-            }
             break;
             
         // --- OTA: модуль готов к приёму чанков, отправляем ota_init клиенту ---
@@ -186,21 +176,11 @@ void Protocol::onData(uint16_t topic, const void* data) {
             LOG_INFO(name, "Settings: tank=%.1f", settings.tank_capacity);
             
             // Проверка версии прошивки: если изменилась — OTA прошёл успешно
-            if (_needVersionCheck) {
-                _needVersionCheck = false;
-                if (strcmp(settings.fw_version, FW_VERSION_STR) != 0 && settings.fw_version[0] != '\0') {
-                    LOG_INFO(name, "OTA success: %s -> %s", settings.fw_version, FW_VERSION_STR);
-                    _pendingOtaSuccess = true;
-                    
-                    // Если транспорт уже онлайн — отправляем ota_success сразу
-                    if (transportOnline) {
-                        _pendingOtaSuccess = false;
-                        outDoc.clear();
-                        outDoc["ota_success"] = true;
-                        outDoc["version"] = FW_VERSION_STR;
-                        sendJson();
-                    }
-                }
+           // Если версия изменилась — OTA прошёл успешно
+            if (strcmp(settings.fw_version, FW_VERSION_STR) != 0 && settings.fw_version[0] != '\0') {
+                LOG_INFO(name, "OTA update: %s -> %s", settings.fw_version, FW_VERSION_STR);
+                _pendingOtaUpdate = true;
+                
                 // Обновляем сохранённую версию
                 strncpy(settings.fw_version, FW_VERSION_STR, sizeof(settings.fw_version));
                 publish(Topic::STORAGE, &settings, sizeof(SettingsPack));
@@ -214,16 +194,6 @@ void Protocol::onData(uint16_t topic, const void* data) {
 // ============================================================================
 
 void Protocol::onProcess() {
-    // Отправка отложенного ota_success (если транспорт появился после проверки версии)
-    if (_pendingOtaSuccess && transportOnline) {
-        LOG_INFO(name, "Sending OTA success...");
-        _pendingOtaSuccess = false;
-        outDoc.clear();
-        outDoc["ota_success"] = true;
-        outDoc["version"] = FW_VERSION_STR;
-        sendJson();
-    }
-    
     // Отправка телеметрии (если активна и транспорт онлайн)
     sendTelemetry();
 }
@@ -278,6 +248,13 @@ void Protocol::processIncoming(const char* json) {
             cfg["sSig"]  = settingsOk ? settings.pulses_per_meter : 3.0f;
             cfg["kPrt"]  = settingsOk ? settings.kline_protocol : 0;
             cfg["fw"]    = FW_VERSION_STR;
+
+            // Если было обновление — подмешиваем ota_update
+            if (_pendingOtaUpdate) {
+                _pendingOtaUpdate = false;
+                outDoc["ota_update"] = FW_VERSION_STR;
+            }
+
             break;
         }
         

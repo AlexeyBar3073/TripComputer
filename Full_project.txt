@@ -385,12 +385,12 @@ bool Module::publish(uint16_t topic, const void* data, size_t size) {
  * @brief Базовый класс для всех модулей системы.
  * 
  * Класс Module предоставляет общую функциональность для всех компонентов системы:
- * - Инициализацию
- * - Обработку команд и данных
- * - Подписку на топики
- * - Отправку сообщений
+ * - Инициализацию с автоматическим созданием очереди команд
+ * - Обработку команд и данных через хуки (onCommand, onData)
+ * - Подписку на топики и публикацию сообщений через Router
+ * - Корректное освобождение ресурсов в деструкторе
  * 
- * Все модули (Transport, Calculator и др.) наследуются от Module.
+ * Все модули (Transport, Calculator, Protocol и др.) наследуются от Module.
  */
 
 #ifndef MODULE_H
@@ -402,35 +402,20 @@ bool Module::publish(uint16_t topic, const void* data, size_t size) {
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 
-/**
- * @def MODULE_MAX_SUBS
- * @brief Максимальное количество подписок, которые может иметь модуль.
- */
+/** @brief Максимальное количество подписок, которые может иметь один модуль */
 #define MODULE_MAX_SUBS 6
 
-/**
- * forward declaration
- */
+// Предварительное объявление
 class Router;
 
-/**
- * @class Module
- * @brief Абстрактный базовый класс для всех модулей системы.
- * 
- * Реализует шаблон проектирования "Модуль" с хуками для переопределения.
- * Использует Router для обмена сообщениями.
- */
 class Module {
 public:
-    /**
-     * @brief Имя модуля для логирования.
-     */
+    /** @brief Имя модуля для логирования */
     const char* name;
 
     /**
      * @brief Конструктор модуля.
-     * 
-     * @param moduleName Уникальное имя модуля (для логирования)
+     * @param moduleName Уникальное имя модуля (для логов)
      */
     explicit Module(const char* moduleName)
         : name(moduleName), _router(nullptr), _cmdQueue(nullptr), _subCount(0)
@@ -439,128 +424,71 @@ public:
     }
 
     /**
-     * @brief Виртуальный деструктор.
+     * @brief Деструктор. Освобождает все созданные очереди FreeRTOS.
+     * 
+     * Важно: очереди удаляются только если модуль больше не используется.
+     * В статической прошивке деструктор никогда не вызывается.
      */
-    virtual ~Module() = default;
+    virtual ~Module() {
+        if (_cmdQueue) vQueueDelete(_cmdQueue);
+        for (uint8_t i = 0; i < _subCount; i++) {
+            if (_subs[i].queue) vQueueDelete(_subs[i].queue);
+        }
+    }
 
     /**
      * @brief Инициализация модуля.
      * 
-     * Вызывается при старте системы. Создаёт очередь команд и вызывает onInit().
-     * 
+     * Создаёт очередь команд, подписывает на Topic::SYSTEM, вызывает onInit().
      * @param router Указатель на центральную шину сообщений
      * @return true при успехе, false при ошибке
      */
     bool init(Router* router);
 
     /**
-     * @brief Основной цикл обработки.
+     * @brief Основной цикл обработки модуля.
      * 
-     * Вызывается периодически из задачи FreeRTOS. Выполняет:
-     * - onProcess() — фоновую работу
-     * - onCommand() — обработку команд
-     * - onData() — обработку входящих данных
+     * Порядок вызова:
+     * 1. onProcess() — фоновая работа (расчёты, симуляция)
+     * 2. onCommand() — обработка всех поступивших команд
+     * 3. onData() — обработка данных из подписанных топиков
      */
     void process();
 
 protected:
-    /**
-     * @brief Указатель на шину сообщений.
-     */
-    Router*       _router;
+    Router*       _router;       ///< Указатель на шину сообщений
+    QueueHandle_t _cmdQueue;     ///< Очередь для приёма команд
 
-    /**
-     * @brief Очередь для приёма команд.
-     */
-    QueueHandle_t _cmdQueue;
+    // --- Хуки для переопределения в наследниках ---
 
-    // --- Хуки (для переопределения в наследниках) ---
-
-    /**
-     * @brief Хук инициализации.
-     * 
-     * Вызывается при старте. Может быть переопределён.
-     * 
-     * @return true — успех, false — ошибка
-     */
+    /** @brief Вызывается в конце init(). Здесь модуль создаёт свои очереди и подписывается */
     virtual bool onInit() { return true; }
 
-    /**
-     * @brief Хук периодической обработки.
-     * 
-     * Вызывается каждые несколько миллисекунд. Используется для:
-     * - Обновления симуляции
-     * - Расчётов
-     * - Генерации данных
-     */
+    /** @brief Вызывается в начале process(). Фоновая работа модуля */
     virtual void onProcess() {}
 
-    
-    /**
-     * @brief Хук обработки команд.
-     * 
-     * Вызывается при получении команды (например, сброс поездки).
-     * 
-     * @param cmd Структура команды (код + значение)
-     */
+    /** @brief Вызывается при получении команды из _cmdQueue */
     virtual void onCommand(const CommandMsg& cmd) {}
 
-    
-    /**
-     * @brief Хук приёма данных.
-     * 
-     * Вызывается при получении данных из топика, на который модуль подписан.
-     * 
-     * @param topic Идентификатор топика
-     * @param data Указатель на данные
-     */
+    /** @brief Вызывается при получении данных из подписанного топика */
     virtual void onData(uint16_t topic, const void* data) {}
 
     // --- Методы для наследников ---
 
-    /**
-     * @brief Подписаться на топик с уже созданной очередью.
-     * 
-     * @param topic Идентификатор топика
-     * @param queue Очередь FreeRTOS
-     * @param elemSize Размер элемента
-     * @param depth Глубина очереди (1 = OVERWRITE, >1 = SEND)
-     * @return true — успех, false — ошибка
-     */
+    /** @brief Подписаться на топик с уже созданной очередью */
     bool subscribe(uint16_t topic, QueueHandle_t queue, size_t elemSize, uint8_t depth = 1);
 
-    /**
-     * @brief Создать очередь и подписаться на топик.
-     * 
-     * Создаёт очередь типа OVERWRITE (глубина 1) и подписывает модуль.
-     * 
-     * @param topic Идентификатор топика
-     * @param elemSize Размер элемента данных
-     * @return Указатель на очередь, или nullptr при ошибке
-     */
+    /** @brief Создать OVERWRITE-очередь и подписаться на топик */
     QueueHandle_t subscribeNew(uint16_t topic, size_t elemSize);
 
-    /**
-     * @brief Опубликовать данные в топик.
-     * 
-     * Отправляет данные через Router.
-     * 
-     * @param topic Идентификатор топика
-     * @param data Указатель на данные
-     * @param size Размер данных
-     * @return true — успех, false — ошибка
-     */
+    /** @brief Опубликовать данные в топик через Router */
     bool publish(uint16_t topic, const void* data, size_t size);
 
 private:
-    /**
-     * @struct SubEntry
-     * @brief Запись о подписке модуля.
-     */
     struct SubEntry {
-        uint16_t      topic;   ///< Идентификатор топика
-        QueueHandle_t queue;   ///< Очередь для приёма
-        uint8_t       depth;   ///< Глубина очереди
+        uint16_t      topic;    ///< Идентификатор топика
+        QueueHandle_t queue;    ///< Очередь для приёма
+        uint8_t       depth;    ///< Глубина очереди (1 = OVERWRITE)
     };
 
     SubEntry _subs[MODULE_MAX_SUBS];  ///< Массив подписок
@@ -710,8 +638,8 @@ typedef struct {
 
 #define FW_VERSION_MAJOR 0
 #define FW_VERSION_MINOR 3
-#define FW_VERSION_BUILD 7
-#define FW_VERSION_STR   "0.3.7"
+#define FW_VERSION_BUILD 14
+#define FW_VERSION_STR   "0.3.14"
 
 #endif
 // END src/core/version.h
@@ -873,6 +801,7 @@ void loop() { delay(1000); }
 #include "calculator.h"
 #include "core/message.h"
 #include "core/logging.h"
+#include <math.h>
 
 /**
  * @brief Инициализация модуля Calculator.
@@ -977,7 +906,7 @@ void Calculator::onData(uint16_t topic, const void* data) {
                 pack.fuel_trip_b     = fuelBBase + curFuel;
                 pack.trip_cur        = curDist;
                 pack.fuel_cur        = curFuel;
-                pack.fuel_level      = notFuel ? max(0.0f, fuelBase - curFuel) : 0;
+                pack.fuel_level      = notFuel ? fmaxf(0.0f, fuelBase - curFuel) : 0;
                 pack.avg_consumption = (curDist > 0.001f) ? (curFuel / curDist) * 100.0f : 0;
                 pack.avg_total       = avgTotal;
                 publish(Topic::CALCULATOR, &pack, sizeof(pack));
@@ -1055,7 +984,7 @@ void Calculator::onProcess() {
         pack.fuel_trip_b     = fuelBBase + curFuel;
         pack.trip_cur        = curDist;
         pack.fuel_cur        = curFuel;
-        pack.fuel_level      = notFuel ? max(0.0f, fuelBase - curFuel) : 0;
+        pack.fuel_level      = notFuel ? fmaxf(0.0f, fuelBase - curFuel) : 0;
         pack.avg_consumption = (curDist > 0.001f) ? (curFuel / curDist) * 100.0f : 0;
         avgCur = pack.avg_consumption;
         pack.avg_total       = avgTotal;
@@ -1523,25 +1452,41 @@ private:
 
 // START src/modules/ota.cpp
 // ======================================================================
+/**
+ * @file ota.cpp
+ * @brief Модуль OTA-обновления прошивки.
+ * 
+ * Принимает команды от Protocol, получает чанки прошивки через Topic::OTA,
+ * декодирует base64, проверяет CRC16, пишет во flash через Update.h.
+ * После успешной записи всех чанков — отправляет ota_restart и перезагружается.
+ */
+
 #include "ota.h"
 #include "core/message.h"
 #include "core/logging.h"
 #include <Update.h>
 
-// Base64 таблица
+/** @brief Таблица символов Base64 для декодирования */
 static const char B64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 bool Ota::onInit() {
     chunkQueue = xQueueCreate(1, sizeof(OtaChunk));
     if (!chunkQueue) return false;
     
-    subscribe(Topic::OTA, chunkQueue, sizeof(OtaChunk), 1);  // OVERWRITE
+    subscribe(Topic::OTA, chunkQueue, sizeof(OtaChunk), 1);  // OVERWRITE — андроид ждёт подтверждения
     return true;
 }
 
 void Ota::onCommand(const CommandMsg& cmd) {
     LOG_INFO(name, "Got cmd: 0x%02X, value=%.0f", cmd.cmd, cmd.value);
+    
     switch (cmd.cmd) {
+        /**
+         * @brief CMD_OTA_UPDATE — начало OTA-обновления.
+         * 
+         * Получает размер прошивки от Protocol, рассчитывает количество чанков,
+         * отправляет CMD_OTA_INIT с размером одного чанка.
+         */
         case CMD_OTA_UPDATE:
             if (!otaActive) {
                 firmwareSize = (size_t)cmd.value;
@@ -1552,37 +1497,46 @@ void Ota::onCommand(const CommandMsg& cmd) {
                 
                 LOG_INFO(name, "OTA update: size=%u, chunks=%d", firmwareSize, totalChunks);
                 
-                // Отправляем CMD_OTA_INIT — готовы к приёму
                 CommandMsg resp = {CMD_OTA_INIT, (float)chunkSize};
                 publish(Topic::SYSTEM, &resp, sizeof(resp));
             }
             break;
 
+        /**
+         * @brief CMD_OTA_END — завершение OTA.
+         * 
+         * Вызывает Update.end() для проверки целостности прошивки.
+         * При успехе отправляет ota_restart и перезагружается.
+         */
         case CMD_OTA_END:
-            if (otaActive && Update.end(true))
-            {
-                // Шлём ota_restart через Protocol
+            if (otaActive && Update.end(true)) {
+                // Шлём ota_restart клиенту перед перезагрузкой
                 CommandMsg resp = {CMD_OTA_RESTART, 0};
                 publish(Topic::SYSTEM, &resp, sizeof(resp));
 
                 LOG_INFO(name, "OTA complete: %u bytes, rebooting...", written);
-                delay(200); // даём время на отправку
+                vTaskDelay(pdMS_TO_TICKS(200));  // даём время на отправку ota_restart
                 ESP.restart();
-            }
-            else
-            {
+            } else {
                 LOG_ERROR(name, "OTA end failed");
             }
             break;
-        }
+    }
 }
 
+/**
+ * @brief Получение чанка прошивки из Topic::OTA.
+ * 
+ * Копирует данные из общего буфера в локальную переменную (чтобы избежать
+ * перезаписи при переключении задач), затем обрабатывает чанк.
+ */
 void Ota::onData(uint16_t topic, const void* data) {
     if (topic == Topic::OTA) {
-        OtaChunk chunk;  // <-- ЛОКАЛЬНАЯ КОПИЯ НА СТЕКЕ
+        OtaChunk chunk;
         memcpy(&chunk, data, sizeof(OtaChunk));
         
         LOG_INFO(name, "Got chunk: pack=%d, len=%d", chunk.pack, chunk.bin_len);
+        
         if (otaActive) {
             processChunk(&chunk);
         } else {
@@ -1594,6 +1548,11 @@ void Ota::onData(uint16_t topic, const void* data) {
     }
 }
 
+/**
+ * @brief Проверка таймаута OTA.
+ * 
+ * Если чанки не приходят более 30 секунд — прерывает обновление.
+ */
 void Ota::onProcess() {
     if (otaActive && (millis() - lastChunkTime > OTA_TIMEOUT_MS)) {
         LOG_ERROR(name, "OTA timeout, aborting");
@@ -1602,8 +1561,15 @@ void Ota::onProcess() {
     }
 }
 
+/**
+ * @brief Инициализация Update.begin() при получении первого чанка.
+ * 
+ * Проверяет, что размер прошивки не превышает доступное место.
+ * Вызывается лениво — не при получении команды, а при первом чанке.
+ * Это позволяет другим задачам завершиться и освободить память.
+ */
 bool Ota::initializeUpdate() {
-    if (otaActive) return true;  // уже инициализирован
+    if (otaActive) return true;
     
     if (firmwareSize > ESP.getFreeSketchSpace()) {
         LOG_ERROR(name, "Firmware too large: %u > %u", firmwareSize, ESP.getFreeSketchSpace());
@@ -1620,26 +1586,29 @@ bool Ota::initializeUpdate() {
     return true;
 }
 
+/**
+ * @brief Обработка одного чанка прошивки.
+ * 
+ * Порядок:
+ * 1. Проверка номера чанка (последовательность)
+ * 2. Декодирование base64 в бинарные данные
+ * 3. Проверка CRC16 (если передан)
+ * 4. Запись во flash через Update.write()
+ * 5. Отправка CMD_OTA_WRITE с номером записанного чанка (или ошибкой)
+ */
 void Ota::processChunk(const OtaChunk* chunk) {
     LOG_INFO(name, "Processing chunk %d", chunk->pack);
     if (!chunk || chunk->pack == 0) return;
     
-    // Инициализация при первом чанке
-    if (!otaActive && !initializeUpdate()) {
-        CommandMsg resp = {CMD_OTA_WRITE, -(float)chunk->pack};
-        publish(Topic::SYSTEM, &resp, sizeof(resp));
-        return;
-    }
-    
     // Проверка последовательности
     if (chunk->pack != expectedPack) {
         LOG_ERROR(name, "Wrong pack: %d != %d", chunk->pack, expectedPack);
-        CommandMsg resp = {CMD_OTA_WRITE, -(float)expectedPack};  // запрос повтора
+        CommandMsg resp = {CMD_OTA_WRITE, -(float)expectedPack};
         publish(Topic::SYSTEM, &resp, sizeof(resp));
         return;
     }
     
-    // Декодируем base64
+    // Декодирование base64
     int decodedLen = base64Decode(chunk->b64, decodeBuf, OTA_DECODE_BUF_SIZE);
     if (decodedLen <= 0 || decodedLen > OTA_CHUNK_BIN_SIZE) {
         LOG_ERROR(name, "Base64 decode failed: pack=%d", chunk->pack);
@@ -1648,7 +1617,7 @@ void Ota::processChunk(const OtaChunk* chunk) {
         return;
     }
     
-    // Проверяем CRC16
+    // Проверка CRC16
     if (chunk->crc16 != 0) {
         uint16_t calc = crc16(decodeBuf, decodedLen);
         if (calc != chunk->crc16) {
@@ -1659,7 +1628,7 @@ void Ota::processChunk(const OtaChunk* chunk) {
         }
     }
     
-    // Пишем
+    // Запись во flash
     size_t w = Update.write(decodeBuf, decodedLen);
     if (w != (size_t)decodedLen) {
         LOG_ERROR(name, "Write failed: pack=%d", chunk->pack);
@@ -1672,11 +1641,17 @@ void Ota::processChunk(const OtaChunk* chunk) {
     expectedPack++;
     lastChunkTime = millis();
     
-    // Успех
+    // Подтверждение успешной записи
     CommandMsg resp = {CMD_OTA_WRITE, (float)chunk->pack};
     publish(Topic::SYSTEM, &resp, sizeof(resp));
 }
 
+/**
+ * @brief Вычисление CRC16 (полином 0xA001, CRC-16-IBM).
+ * @param data Указатель на данные
+ * @param len  Длина данных в байтах
+ * @return 16-битная контрольная сумма
+ */
 uint16_t Ota::crc16(const uint8_t* data, size_t len) {
     uint16_t crc = 0xFFFF;
     for (size_t i = 0; i < len; i++) {
@@ -1689,11 +1664,19 @@ uint16_t Ota::crc16(const uint8_t* data, size_t len) {
     return crc;
 }
 
+/**
+ * @brief Декодирование Base64 в бинарные данные.
+ * @param input  Входная строка в кодировке Base64
+ * @param output Буфер для бинарных данных
+ * @param maxLen Максимальный размер выходного буфера
+ * @return Количество декодированных байт, или -1 при переполнении
+ */
 int Ota::base64Decode(const char* input, uint8_t* output, int maxLen) {
     int outLen = 0;
     int val = 0, valb = -8;
     
     for (; *input; input++) {
+        // Пропускаем пробелы, переводы строк и символы заполнения
         if (*input == '=' || *input == '\r' || *input == '\n' || *input == ' ') continue;
         
         const char* p = strchr(B64, *input);
@@ -1762,8 +1745,12 @@ private:
  * @file protocol.cpp
  * @brief Реализация JSON-протокола обмена данными.
  * 
- * Обрабатывает входящие команды и формирует ответы в формате JSON.
- * Управляет потоком телеметрии по требованию.
+ * Protocol — «бюрократ» системы. Принимает входящие JSON-команды от Transport,
+ * парсит их, выполняет свою часть работы (get_cfg, set_cfg, телеметрия, OTA),
+ * а остальные команды сквозняком передаёт в шину Topic::SYSTEM.
+ * 
+ * Формирует исходящие JSON-ответы и публикует их в Topic::PROTOCOL.
+ * Телеметрия отправляется фракционно: FAST (150 мс), TRIP (600 мс), SERVICE (1.5 с).
  */
 
 #include "protocol.h"
@@ -1772,24 +1759,24 @@ private:
 #include "core/ota_chunk.h"
 #include "core/version.h"
 
-// ---------- Таблица всех поддерживаемых команд ----------
+// ============================================================================
+// Таблица всех команд: строковое имя → код команды
+// ============================================================================
 
 /**
  * @struct CmdEntry
- * @brief Связка имени команды и её кода.
- * 
- * Используется для поиска команды по строковому имени.
+ * @brief Связка «строка — код команды» для парсинга JSON.
  */
 struct CmdEntry {
     const char* name;   ///< Имя команды в JSON (например, "get_cfg")
-    uint8_t     code;   ///< Соответствующий код команды (enum Command)
+    uint8_t     code;   ///< Код команды (enum Command)
 };
 
 /**
- * @brief Таблица всех поддерживаемых команд.
+ * @brief Таблица всех известных системе команд.
  * 
- * Сопоставляет строковые имена команд с их числовыми кодами.
- * Используется в findCommand() для парсинга.
+ * Содержит ВСЕ команды, включая те, которые Protocol не обрабатывает сам
+ * (они передаются сквозняком в шину другим модулям).
  */
 static const CmdEntry CMD_TABLE[] = {
     {"get_cfg",             CMD_GET_CFG},
@@ -1801,23 +1788,20 @@ static const CmdEntry CMD_TABLE[] = {
     {"correct_odo",         CMD_CORRECT_ODO},
     {"start_telemetry",     CMD_START_TELEMETRY},
     {"stop_telemetry",      CMD_STOP_TELEMETRY},
+    {"ota_update",          CMD_OTA_UPDATE},
+    {"ota_data",            CMD_OTA_DATA},
+    {"ota_end",             CMD_OTA_END},
     {"kl_get_dtc",          CMD_KL_GET_DTC},
     {"kl_clear_dtc",        CMD_KL_CLEAR_DTC},
     {"kl_reset_adapt",      CMD_KL_RESET_ADAPT},
     {"kl_pump_atf",         CMD_KL_PUMP_ATF},
     {"kl_detect_protocol",  CMD_KL_DETECT_PROTO},
-    {"ota_update",          CMD_OTA_UPDATE},
-    {"ota_data",            CMD_OTA_DATA},
-    {"ota_end",             CMD_OTA_END},
 };
 
 /**
- * @brief Поиск кода команды по её имени.
- * 
- * Проходит по таблице CMD_TABLE и возвращает код команды.
- * 
- * @param name Указатель на строку с именем команды
- * @return Код команды, или CMD_NONE если не найдена
+ * @brief Поиск кода команды по строковому имени.
+ * @param name Имя команды (например, "get_cfg")
+ * @return Код команды, или CMD_NONE если команда не найдена
  */
 static uint8_t findCommand(const char* name) {
     for (const auto& e : CMD_TABLE) {
@@ -1826,46 +1810,37 @@ static uint8_t findCommand(const char* name) {
     return CMD_NONE;
 }
 
-// ---------- Реализация Protocol ----------
+// ============================================================================
+// Инициализация
+// ============================================================================
 
-/**
- * @brief Инициализация модуля Protocol.
- * 
- * Подписывается на:
- * - Topic::TRANSPORT  — входящие JSON-команды
- * - Topic::SENSOR     — данные с датчиков
- * - Topic::CALCULATOR — данные о пробеге и расходе
- * - Topic::KLINE      — данные K-Line
- * - Topic::SERVICE    — данные климат-системы
- * - Topic::STORAGE    — настройки устройства
- * 
- * @return true — всегда успешна
- */
 bool Protocol::onInit() {
-    subscribeNew(Topic::TRANSPORT, 512);
-    subscribeNew(Topic::SENSOR,     sizeof(EnginePack));
-    subscribeNew(Topic::CALCULATOR, sizeof(TripPack));
-    subscribeNew(Topic::KLINE,      sizeof(KlinePack));
-    subscribeNew(Topic::SERVICE,    sizeof(ClimatePack));
-    subscribeNew(Topic::STORAGE,    sizeof(SettingsPack));
+    // Подписка на все источники данных для формирования телеметрии
+    subscribeNew(Topic::TRANSPORT,  512);                 // Входящие JSON-команды от клиента
+    subscribeNew(Topic::SENSOR,     sizeof(EnginePack));  // Данные с датчиков двигателя
+    subscribeNew(Topic::CALCULATOR, sizeof(TripPack));    // Расчётные данные (пробег, расход)
+    subscribeNew(Topic::KLINE,      sizeof(KlinePack));   // Данные K-Line диагностики
+    subscribeNew(Topic::SERVICE,    sizeof(ClimatePack)); // Климатические данные
+    subscribeNew(Topic::STORAGE,    sizeof(SettingsPack));// Настройки устройства
 
+    // При первом получении настроек проверим версию прошивки (OTA success)
     _needVersionCheck = true;
     return true;
 }
 
-/**
- * @brief Обработка команд.
- * 
- * Реагирует на CMD_TRANSPORT_STATUS — изменение состояния подключения.
- * 
- * @param cmd Команда от системы
- */
+// ============================================================================
+// Обработка системных команд (вызывается из Module::process)
+// ============================================================================
+
 void Protocol::onCommand(const CommandMsg& cmd) {
     switch (cmd.cmd) {
+        
+        // --- Статус транспортного канала (BT подключился / отключился) ---
         case CMD_TRANSPORT_STATUS:
             transportOnline = (cmd.value != 0);
             LOG_INFO(name, "Transport %s", transportOnline ? "ONLINE" : "OFFLINE");
             
+            // Если ожидается отправка ota_success — отправляем при подключении
             if (transportOnline && _pendingOtaSuccess) {
                 _pendingOtaSuccess = false;
                 outDoc.clear();
@@ -1875,6 +1850,7 @@ void Protocol::onCommand(const CommandMsg& cmd) {
             }
             break;
             
+        // --- OTA: модуль готов к приёму чанков, отправляем ota_init клиенту ---
         case CMD_OTA_INIT: {
             uint16_t cs = (uint16_t)cmd.value;
             int total = (otaFirmwareSize + cs - 1) / cs;
@@ -1888,19 +1864,21 @@ void Protocol::onCommand(const CommandMsg& cmd) {
             break;
         }
         
+        // --- OTA: результат записи чанка (успех — номер, ошибка — запрос повтора) ---
         case CMD_OTA_WRITE: {
             int pack = (int)cmd.value;
             outDoc.clear();
             if (pack > 0) {
-                outDoc["ota_read"] = pack;
+                outDoc["ota_read"] = pack;          // Подтверждение успешной записи
             } else {
                 JsonObject replay = outDoc["ota_replay"].to<JsonObject>();
-                replay["pack"] = -pack;
+                replay["pack"] = -pack;              // Запрос повторной отправки чанка
             }
             sendJson();
             break;
         }
         
+        // --- OTA: перезагрузка после успешной прошивки ---
         case CMD_OTA_RESTART:
             outDoc.clear();
             outDoc["ota_restart"] = 1;
@@ -1909,58 +1887,60 @@ void Protocol::onCommand(const CommandMsg& cmd) {
     }
 }
 
-/**
- * @brief Обработка входящих данных.
- * 
- * Копирует данные из топиков в локальные переменные и устанавливает флаги.
- * 
- * @param topic Идентификатор топика
- * @param data  Указатель на данные
- */
+// ============================================================================
+// Приём данных из подписанных топиков (вызывается из Module::process)
+// ============================================================================
+
 void Protocol::onData(uint16_t topic, const void* data) {
     switch (topic) {
         case Topic::TRANSPORT:
+            // Входящая JSON-команда от Bluetooth-клиента
             processIncoming((const char*)data);
             break;
             
         case Topic::SENSOR:
+            // FAST-данные от двигателя (скорость, обороты, напряжение, расход)
             memcpy(&engine, data, sizeof(EnginePack));
             engineOk = true;
             break;
             
         case Topic::CALCULATOR:
+            // TRIP-данные от вычислителя (пробег, расход, средние)
             memcpy(&trip, data, sizeof(TripPack));
             tripOk = true;
             break;
             
         case Topic::KLINE:
+            // Данные K-Line диагностики (температуры, АКПП, коды ошибок)
             memcpy(&kline, data, sizeof(KlinePack));
             klineOk = true;
             break;
             
         case Topic::SERVICE:
+            // Климатические данные (температуры салона/улицы, давление шин)
             memcpy(&climate, data, sizeof(ClimatePack));
             climateOk = true;
             break;
             
         case Topic::STORAGE:
+            // Настройки устройства (при старте или после set_cfg)
             memcpy(&settings, data, sizeof(SettingsPack));
             settingsOk = true;
             LOG_INFO(name, "Settings: tank=%.1f", settings.tank_capacity);
             
+            // Проверка версии прошивки: если изменилась — OTA прошёл успешно
             if (_needVersionCheck) {
                 _needVersionCheck = false;
                 if (strcmp(settings.fw_version, FW_VERSION_STR) != 0 && settings.fw_version[0] != '\0') {
-                    LOG_INFO(name, "OTA success: %s -> %s", settings.fw_version, FW_VERSION_STR);
+                    LOG_INFO(name, "OTA update: %s -> %s", settings.fw_version, FW_VERSION_STR);
                     _pendingOtaSuccess = true;
-                    if (transportOnline) {
-                        _pendingOtaSuccess = false;
-                        outDoc.clear();
-                        outDoc["ota_success"] = true;
-                        outDoc["version"] = FW_VERSION_STR;
-                        sendJson();
-                    }
+                    
+                    // Отправляем уведомление об обновлении
+                    outDoc.clear();
+                    outDoc["ota_update"] = FW_VERSION_STR;
+                    sendJson();
                 }
+                // Обновляем сохранённую версию
                 strncpy(settings.fw_version, FW_VERSION_STR, sizeof(settings.fw_version));
                 publish(Topic::STORAGE, &settings, sizeof(SettingsPack));
             }
@@ -1968,43 +1948,41 @@ void Protocol::onData(uint16_t topic, const void* data) {
     }
 }
 
-/**
- * @brief Периодическая обработка.
- * 
- * Вызывает sendTelemetry() для отправки данных, если разрешено.
- */
+// ============================================================================
+// Фоновая работа (вызывается из Module::process)
+// ============================================================================
+
 void Protocol::onProcess() {
-    if (_pendingOtaSuccess && transportOnline) {
-        LOG_INFO(name, "Sending OTA success...");
-        _pendingOtaSuccess = false;
-        outDoc.clear();
-        outDoc["ota_success"] = true;
-        outDoc["version"] = FW_VERSION_STR;
-        sendJson();
-    }
-    
+    // Отправка телеметрии (если активна и транспорт онлайн)
     sendTelemetry();
 }
 
-// ---------- Обработка входящих команд ----------
+// ============================================================================
+// Диспетчер входящих JSON-команд
+// ============================================================================
 
 /**
- * @brief Обработка входящей JSON-команды.
+ * @brief Главный диспетчер входящих команд.
  * 
- * Разбирает JSON, определяет команду и выполняет соответствующее действие.
- * Формирует ответ (ack_id) и отправляет его.
+ * Разбирает JSON, определяет команду, вызывает соответствующий обработчик.
+ * Команды, которые Protocol не обрабатывает сам — передаёт сквозняком в шину
+ * через Topic::SYSTEM (их получат Calculator, KLine, Engine и другие модули).
+ * Всегда добавляет ack_id к ответу, если входящий msg_id > 0.
  * 
  * @param json Указатель на строку с JSON-командой
  */
 void Protocol::processIncoming(const char* json) {
+    // 1. Парсим входящий JSON
     inDoc.clear();
     DeserializationError err = deserializeJson(inDoc, json);
     
     const char* cmdStr = inDoc["command"] | inDoc["cmd"];
     int inMsgId = inDoc["msg_id"] | 0;
     
+    // Готовим исходящий документ
     outDoc.clear();
     
+    // 2. Если JSON битый или без команды — просто ACK
     if (err || !cmdStr) {
         if (inMsgId > 0) outDoc["ack_id"] = inMsgId;
         sendJson();
@@ -2013,33 +1991,34 @@ void Protocol::processIncoming(const char* json) {
     
     LOG_INFO(name, "Cmd: %s, id=%d", cmdStr, inMsgId);
     
+    // 3. Определяем код команды по строковому имени
     Command cmd = (Command)findCommand(cmdStr);
     
+    // 4. Выполняем команду
     switch (cmd) {
-        case CMD_GET_CFG:
-            buildCfgResponse();
-            break;
-            
-        case CMD_SET_CFG: {
-            JsonObject in = inDoc["data"];
-            if (in) {
-                SettingsPack cfg = settings;
-                if (in["tV"])    cfg.tank_capacity    = in["tV"];
-                if (in["iPerf"]) cfg.injector_flow    = in["iPerf"];
-                if (in["iCnt"])  cfg.injector_count   = in["iCnt"];
-                if (in["sSig"])  cfg.pulses_per_meter = in["sSig"];
-                if (in["kPrt"])  cfg.kline_protocol   = in["kPrt"];
-                
-                if (memcmp(&cfg, &settings, sizeof(SettingsPack)) != 0) {
-                    memcpy(&settings, &cfg, sizeof(SettingsPack));
-                    settingsOk = true;
-                    publish(Topic::STORAGE, &cfg, sizeof(SettingsPack));
-                }
-            }
+        
+        // === Запрос настроек ===
+        case CMD_GET_CFG: {
+            // Формируем JSON с текущими настройками из кэша (или значениями по умолчанию)
+            JsonObject cfg = outDoc["cfg"].to<JsonObject>();
+            cfg["tV"]    = settingsOk ? settings.tank_capacity : 60.0f;
+            cfg["iPerf"] = settingsOk ? settings.injector_flow : 250.0f;
+            cfg["iCnt"]  = settingsOk ? settings.injector_count : 4;
+            cfg["sSig"]  = settingsOk ? settings.pulses_per_meter : 3.0f;
+            cfg["kPrt"]  = settingsOk ? settings.kline_protocol : 0;
+            cfg["fw"]    = FW_VERSION_STR;
             break;
         }
+        
+        // === Установка настроек ===
+        case CMD_SET_CFG:
+            // Парсим поле "data", обновляем кэш, отправляем в Storage для сохранения
+            cmdSetCfg(json);
+            break;
             
+        // === Корректировка одометра ===
         case CMD_CORRECT_ODO: {
+            // Извлекаем значение: data как число или data.value как число
             int odo = inDoc["data"] | 0;
             if (odo == 0) odo = inDoc["data"]["value"] | 0;
             if (odo > 0) {
@@ -2049,182 +2028,179 @@ void Protocol::processIncoming(const char* json) {
             break;
         }
             
+        // === Запуск телеметрии ===
         case CMD_START_TELEMETRY:
+            // Взводим флаг, сбрасываем счётчики для первой полной отправки
             telemetryActive = true;
             telemetryCounter = 0;
             lastTelemetryMs = 0;
             firstTelemetry = true;
             break;
             
+        // === Остановка телеметрии ===
         case CMD_STOP_TELEMETRY:
             telemetryActive = false;
             break;
             
-        // --- OTA ---
-        case CMD_OTA_UPDATE: {
-            // Android: {"command":"ota_update","size":123456,"msg_id":5}
-            int fwSize = inDoc["size"] | 0;
-            if (fwSize > 0) {
-                LOG_INFO(name, "OTA update: size=%d", fwSize);
-                telemetryActive = false;  // останавливаем телеметрию
-                otaFirmwareSize = fwSize;
-                
-                // Отправляем команду OTA-модулю
-                CommandMsg c = {CMD_OTA_UPDATE, (float)fwSize};
-                publish(Topic::SYSTEM, &c, sizeof(c));
-                
-                // ota_init ответ будет после получения CMD_OTA_INIT
-            }
+        // === OTA: начало обновления ===
+        case CMD_OTA_UPDATE:
+            // Останавливаем телеметрию, сохраняем размер прошивки, запускаем OTA-модуль
+            cmdOtaUpdate();
             break;
-        }
-        
-        case CMD_OTA_DATA: {
-            // Android: {"command":"ota_data","msg_id":6,"data":{"pack":1,"bin":"...","crc16":12345}}
-            JsonObject d = inDoc["data"];
-            if (d) {
-                OtaChunk chunk;
-                chunk.pack = d["pack"] | 0;
-                chunk.crc16 = d["crc16"] | 0;
-                const char* b64 = d["bin"] | "";
-                chunk.bin_len = strlen(b64);
-                strncpy(chunk.b64, b64, OTA_CHUNK_B64_SIZE);
-                chunk.b64[OTA_CHUNK_B64_SIZE] = '\0';
-                
-                if (chunk.pack > 0 && chunk.bin_len > 0) {
-                    publish(Topic::OTA, &chunk, sizeof(OtaChunk));
-                }
-            }
+            
+        // === OTA: данные чанка ===
+        case CMD_OTA_DATA:
+            // Извлекаем pack, crc16, base64-строку и отправляем в OTA-модуль через Topic::OTA
+            cmdOtaData();
             break;
-        }
-        
+            
+        // === OTA: завершение ===
         case CMD_OTA_END: {
             LOG_INFO(name, "OTA end");
             CommandMsg c = {CMD_OTA_END, 0};
             publish(Topic::SYSTEM, &c, sizeof(c));
             break;
         }
-            
-        // Команды шины
-        case CMD_RESET_TRIP_A:
-        case CMD_RESET_TRIP_B:
-        case CMD_RESET_AVG:
-        case CMD_FULL_TANK:
-        case CMD_KL_GET_DTC:
-        case CMD_KL_CLEAR_DTC:
-        case CMD_KL_RESET_ADAPT:
-        case CMD_KL_PUMP_ATF:
-        case CMD_KL_DETECT_PROTO: {
-            CommandMsg c = {(uint8_t)cmd, 0};
-            publish(Topic::SYSTEM, &c, sizeof(c));
-            break;
-        }
-            
+        
+        // === Все остальные команды — сквозняком в шину ===
+        // Их получат модули-подписчики через свои _cmdQueue:
+        // Calculator: CMD_RESET_TRIP_A/B, CMD_RESET_AVG, CMD_FULL_TANK
+        // KLine: CMD_KL_GET_DTC, CMD_KL_CLEAR_DTC, CMD_KL_RESET_ADAPT, ...
         default:
+            if (cmd != CMD_NONE) {
+                CommandMsg c = {(uint8_t)cmd, 0};
+                publish(Topic::SYSTEM, &c, sizeof(c));
+            }
             break;
     }
     
+    // 5. Всегда добавляем ack_id к ответу (квитанция доставки)
     if (inMsgId > 0) {
         outDoc["ack_id"] = inMsgId;
     }
-
+    
     sendJson();
 }
 
-// ---------- Обработка get_cfg / set_cfg ----------
-
-/**
- * @brief Формирование ответа на get_cfg.
- * 
- * Заполняет outDoc полями из сохранённых настроек или значениями по умолчанию.
- */
-void Protocol::buildCfgResponse() {
-    JsonObject cfg = outDoc["cfg"].to<JsonObject>();
-    cfg["tV"]    = settingsOk ? settings.tank_capacity : 60.0f;
-    cfg["iPerf"] = settingsOk ? settings.injector_flow : 250.0f;
-    cfg["iCnt"]  = settingsOk ? settings.injector_count : 4;
-    cfg["sSig"]  = settingsOk ? settings.pulses_per_meter : 3.0f;
-    cfg["kPrt"]  = settingsOk ? settings.kline_protocol : 0;
-    cfg["fw"]    = FW_VERSION_STR;
-}
+// ============================================================================
+// Обработчики сложных команд
+// ============================================================================
 
 /**
  * @brief Обработка команды set_cfg.
  * 
- * Обновляет локальные настройки из поля "data" входящего JSON.
- * Устанавливает флаг settingsChanged при изменении.
+ * Парсит поле "data" из входящего JSON, обновляет кэш настроек,
+ * публикует новый SettingsPack в Topic::STORAGE для сохранения на флеш.
+ * 
+ * @param rawJson Исходная JSON-строка (не используется, оставлена для совместимости)
  */
-void Protocol::handleSetCfg() {
+void Protocol::cmdSetCfg(const char* rawJson) {
     JsonObject in = inDoc["data"];
     if (!in) return;
     
-    // Создание копии текущих настроек
-    SettingsPack newCfg = settings;
+    // Создаём копию текущих настроек и обновляем поля, которые присутствуют в JSON
+    SettingsPack cfg = settings;
+    if (in["tV"])    cfg.tank_capacity    = in["tV"];
+    if (in["iPerf"]) cfg.injector_flow    = in["iPerf"];
+    if (in["iCnt"])  cfg.injector_count   = in["iCnt"];
+    if (in["sSig"])  cfg.pulses_per_meter = in["sSig"];
+    if (in["kPrt"])  cfg.kline_protocol   = in["kPrt"];
     
-    // Обновление полей, если они присутствуют
-    if (in["tV"])    newCfg.tank_capacity    = in["tV"];
-    if (in["iPerf"]) newCfg.injector_flow    = in["iPerf"];
-    if (in["iCnt"])  newCfg.injector_count   = in["iCnt"];
-    if (in["sSig"])  newCfg.pulses_per_meter = in["sSig"];
-    if (in["kPrt"])  newCfg.kline_protocol   = in["kPrt"];
-    
-    // Проверка изменений
-    if (memcmp(&newCfg, &settings, sizeof(SettingsPack)) != 0) {
-        memcpy(&settings, &newCfg, sizeof(SettingsPack));
+    // Отправляем в Storage только если есть реальные изменения
+    if (memcmp(&cfg, &settings, sizeof(SettingsPack)) != 0) {
+        memcpy(&settings, &cfg, sizeof(SettingsPack));
         settingsOk = true;
-        settingsChanged = true;
+        publish(Topic::STORAGE, &cfg, sizeof(SettingsPack));
     }
 }
 
-// ---------- Реализация телеметрии ----------
+/**
+ * @brief Обработка команды ota_update.
+ * 
+ * Останавливает потоковую телеметрию (освобождает память и канал),
+ * сохраняет размер прошивки, отправляет команду CMD_OTA_UPDATE в OTA-модуль.
+ */
+void Protocol::cmdOtaUpdate() {
+    int fwSize = inDoc["size"] | 0;
+    if (fwSize > 0) {
+        LOG_INFO(name, "OTA update: size=%d", fwSize);
+        telemetryActive = false;          // Останавливаем телеметрию
+        otaFirmwareSize = fwSize;         // Сохраняем размер для расчёта количества чанков
+        CommandMsg c = {CMD_OTA_UPDATE, (float)fwSize};
+        publish(Topic::SYSTEM, &c, sizeof(c));
+    }
+}
+
+/**
+ * @brief Обработка команды ota_data.
+ * 
+ * Извлекает из JSON поля: pack (номер чанка), crc16 (контрольная сумма),
+ * bin (base64-строка с данными). Формирует структуру OtaChunk и публикует
+ * её в Topic::OTA для обработки OTA-модулем.
+ */
+void Protocol::cmdOtaData() {
+    JsonObject d = inDoc["data"];
+    if (!d) return;
+    
+    OtaChunk chunk;
+    chunk.pack   = d["pack"] | 0;
+    chunk.crc16  = d["crc16"] | 0;
+    const char* b64 = d["bin"] | "";
+    chunk.bin_len = strlen(b64);
+    strncpy(chunk.b64, b64, OTA_CHUNK_B64_SIZE);
+    chunk.b64[OTA_CHUNK_B64_SIZE] = '\0';
+    
+    if (chunk.pack > 0 && chunk.bin_len > 0) {
+        publish(Topic::OTA, &chunk, sizeof(OtaChunk));
+    }
+}
+
+// ============================================================================
+// Телеметрия
+// ============================================================================
 
 /**
  * @brief Отправка пакета телеметрии.
  * 
- * Формирует и отправляет пакет, если разрешено и транспорт онлайн.
- * Ограничивает частоту отправки до 150 мс.
+ * Формирует и отправляет пакет, если телеметрия активна и транспорт онлайн.
+ * Частота: каждые 150 мс.
+ * Первая отправка — полная (FAST + TRIP + SERVICE).
+ * Далее: FAST каждый пакет, TRIP каждый 4-й (~600 мс), SERVICE каждый 10-й (~1.5 с).
  */
 void Protocol::sendTelemetry() {
-    // Проверка условий отправки
     if (!telemetryActive || !transportOnline) return;
     
     unsigned long now = millis();
-    
-    // Ограничение частоты: минимум 150 мс между пакетами
     if (!firstTelemetry && now - lastTelemetryMs < 150) return;
     lastTelemetryMs = now;
     
-    // Формирование базового пакета (каждые 150 мс)
+    // Формируем базовый пакет (скорость, обороты, напряжение, селектор, топливо)
     buildFastJson();
     
-    // Добавление полей поездки каждые 4-й пакет (~600 мс)
+    // Каждые 4 пакета добавляем trip-поля (пробег, расход, средние)
     if (firstTelemetry || telemetryCounter % 4 == 0) {
         addTripFields();
     }
     
-    // Добавление сервисных полей каждые 10-й пакет (~1.5 с)
+    // Каждые 10 пакетов добавляем service-поля (температуры, DTC, климат)
     if (firstTelemetry || telemetryCounter % 10 == 0) {
         addServiceFields();
     }
     
-    // Сброс флага первой отправки
     if (firstTelemetry) {
         firstTelemetry = false;
     } else {
         telemetryCounter++;
     }
     
-    // Отправка сформированного JSON
     sendJson();
 }
 
 /**
- * @brief Формирование базового пакета телеметрии.
+ * @brief Формирование FAST-пакета телеметрии (каждые 150 мс).
  * 
- * Заполняет поля, обновляемые каждые 150 мс:
- * - Скорость, обороты, напряжение
- * - Состояние двигателя, габаритов
- * - Положение селектора АКПП
- * - Уровень топлива
+ * Поля: скорость, обороты, напряжение, статус двигателя, габариты,
+ * положение селектора АКПП, блокировка ГТ, уровень топлива.
  */
 void Protocol::buildFastJson() {
     outDoc.clear();
@@ -2236,36 +2212,31 @@ void Protocol::buildFastJson() {
     tel["eng"]  = (int)(engineOk ? engine.engine_running : 0);
     tel["hl"]   = (int)(engineOk ? engine.parking_lights : 0);
     
-    // Формирование строки положения селектора
+    // Формируем строку положения селектора: "P", "R", "N", "D", "D2", "3", "2", "L"
     const char* selStr[] = {"P","R","N","D","3","2","L"};
     const char* base = (klineOk && kline.selector_position <= 6) ? selStr[kline.selector_position] : "D";
     char selBuf[8];
     if (klineOk && kline.current_gear > 0 && kline.selector_position == 3)
-        snprintf(selBuf, sizeof(selBuf), "%s%d", base, kline.current_gear);
-    else 
+        snprintf(selBuf, sizeof(selBuf), "%s%d", base, kline.current_gear);  // "D2"
+    else
         snprintf(selBuf, sizeof(selBuf), "%s", base);
     tel["sel"] = selBuf;
     
-    tel["tcc"] = (int)(klineOk ? kline.tcc_lockup : 0);
+    tel["tcc"]  = (int)(klineOk ? kline.tcc_lockup : 0);
     tel["fuel"] = roundf((engineOk ? engine.fuel_level_sensor : 0) * 10) / 10;
 }
 
 /**
- * @brief Добавление полей поездки в телеметрию.
+ * @brief Добавление TRIP-полей в телеметрию (каждые 600 мс).
  * 
- * Добавляет поля, обновляемые каждые 600 мс:
- * - Общий пробег (odo)
- * - Поездки A/B и расход
- * - Текущий пробег и расход
- * - Мгновенный и средний расход
- * 
- * Округление до 1 знака после запятой.
+ * Поля: общий пробег, поездки A/B, расход по поездкам, текущий пробег/расход,
+ * мгновенный расход, средний расход.
  */
 void Protocol::addTripFields() {
     if (!tripOk) return;
     
     JsonObject tel = outDoc["tel"];
-    tel["odo"] = (int)trip.odo;
+    tel["odo"]      = (int)trip.odo;
     tel["trip_a"]   = roundf(trip.trip_a * 10) / 10;
     tel["fuel_a"]   = roundf(trip.fuel_trip_a * 10) / 10;
     tel["trip_b"]   = roundf(trip.trip_b * 10) / 10;
@@ -2275,20 +2246,16 @@ void Protocol::addTripFields() {
     tel["inst"]     = roundf((engineOk ? engine.instant_fuel : 0) * 10) / 10;
     tel["avg_cur"]  = roundf(trip.avg_consumption * 10) / 10;
     
+    // Если есть накопленный средний расход — показываем его, иначе текущий
     float avg = trip.avg_total > 0 ? trip.avg_total : trip.avg_consumption;
     tel["avg"] = roundf(avg * 10) / 10;
 }
 
 /**
- * @brief Добавление сервисных полей в телеметрию.
+ * @brief Добавление SERVICE-полей в телеметрию (каждые 1.5 с).
  * 
- * Добавляет поля, обновляемые каждые 1.5 с:
- * - Температура ОЖ и АКПП
- * - Коды ошибок (DTC)
- * - Температура в салоне и за бортом
- * - Давление в шинах, уровень омывайки
- * 
- * Округление до 1 знака после запятой.
+ * Поля: температура ОЖ и АКПП, коды ошибок, температура салона/улицы,
+ * давление в шинах, уровень омывайки.
  */
 void Protocol::addServiceFields() {
     JsonObject tel = outDoc["tel"];
@@ -2307,16 +2274,21 @@ void Protocol::addServiceFields() {
     }
 }
 
+// ============================================================================
+// Отправка JSON
+// ============================================================================
+
 /**
- * @brief Отправка JSON-пакета.
+ * @brief Сериализация и отправка исходящего JSON.
  * 
- * Сериализует outDoc в строку и публикует в Topic::PROTOCOL.
+ * Проверяет, что документ не пустой (больше 2 символов — не "{}"),
+ * сериализует outDoc в buf и публикует в Topic::PROTOCOL.
  * 
- * @return true при успехе, false если документ пуст
+ * @return true если данные отправлены, false если документ пуст
  */
 bool Protocol::sendJson() {
     size_t len = measureJson(outDoc);
-    if (len <= 2) return false;
+    if (len <= 2) return false;  // Пустой документ "{}" — не отправляем
     
     char buf[512];
     len = serializeJson(outDoc, buf, sizeof(buf));
@@ -2328,116 +2300,53 @@ bool Protocol::sendJson() {
 
 // START src/modules/protocol.h
 // ======================================================================
-/**
- * @file protocol.h
- * @brief Модуль обработки JSON-протокола обмена данными.
- * 
- * Класс Protocol реализует двусторонний JSON-протокол для:
- * - Приёма и разбора команд от клиента
- * - Формирования и отправки телеметрии
- * - Обработки запросов настроек
- * 
- * Работает как мост между транспортом (Bluetooth) и внутренней шиной.
- */
-
 #ifndef PROTOCOL_H
 #define PROTOCOL_H
 
 #include "core/module.h"
 #include "core/packets.h"
 
-/**
- * Подавление предупреждения о deprecated-методах ArduinoJson
- * (используем V6 API для совместимости)
- */
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 #include <ArduinoJson.h>
 #pragma GCC diagnostic pop
 
 /**
- * @class Protocol
- * @brief Модуль JSON-протокола обмена данными.
+ * @brief Модуль JSON-протокола — «бюрократ» системы.
  * 
- * Обрабатывает входящие JSON-команды и формирует ответы.
- * Управляет потоком телеметрии по требованию.
+ * Принимает входящие JSON-команды от Transport, парсит их,
+ * выполняет свою часть работы, остальные команды передаёт в шину.
+ * Формирует исходящие JSON-ответы и фракционную телеметрию.
  */
 class Protocol : public Module {
 public:
-    /**
-     * @brief Конструктор модуля.
-     * 
-     * Устанавливает имя "Protocol" и инициализирует флаги состояния.
-     */
     Protocol() : Module("Protocol")
         , engineOk(false), tripOk(false), klineOk(false), climateOk(false), settingsOk(false)
-        , settingsChanged(false)
         , telemetryActive(false), transportOnline(false)
         , lastTelemetryMs(0), telemetryCounter(0) {}
 
 protected:
-    /**
-     * @brief Инициализация модуля.
-     * 
-     * Подписывается на несколько топиков для сбора данных:
-     * - Topic::TRANSPORT  — входящие JSON-команды
-     * - Topic::SENSOR     — данные с датчиков
-     * - Topic::CALCULATOR — данные о поездке
-     * - Topic::KLINE      — данные K-Line
-     * - Topic::SERVICE    — данные климат-системы
-     * - Topic::STORAGE    — настройки
-     * 
-     * @return true — всегда успешна
-     */
     bool onInit() override;
-
-    /**
-     * @brief Периодическая отправка телеметрии.
-     * 
-     * Если телеметрия активна и транспорт онлайн — отправляет
-     * пакет данных каждые 150 мс.
-     */
     void onProcess() override;
-
-    /**
-     * @brief Обработка команд.
-     * 
-     * Реагирует на CMD_TRANSPORT_STATUS — изменение состояния подключения.
-     * 
-     * @param cmd Команда от системы
-     */
     void onCommand(const CommandMsg& cmd) override;
-
-    /**
-     * @brief Обработка входящих данных.
-     * 
-     * Собирает данные из всех топиков для формирования телеметрии.
-     * 
-     * @param topic Идентификатор топика
-     * @param data  Указатель на данные
-     */
     void onData(uint16_t topic, const void* data) override;
 
 private:
-    // === Кэш данных ===
-    EnginePack  engine;     ///< Последние данные с датчиков
-    TripPack    trip;       ///< Последние данные о поездке
-    KlinePack   kline;      ///< Последние данные K-Line
-    ClimatePack climate;    ///< Последние данные климат-системы
-    SettingsPack settings;  ///< Последние настройки
+    // === Кэш данных для телеметрии ===
+    EnginePack  engine;     bool engineOk;
+    TripPack    trip;       bool tripOk;
+    KlinePack   kline;      bool klineOk;
+    ClimatePack climate;    bool climateOk;
+    SettingsPack settings;  bool settingsOk;
 
-    // === Флаги состояния ===
-    bool engineOk, tripOk, klineOk, climateOk, settingsOk; ///< Флаги: данные загружены
-    bool settingsChanged;   ///< Флаг: настройки изменены, нужно отправить
+    // === Телеметрия ===
+    bool telemetryActive;
+    bool transportOnline;
+    unsigned long lastTelemetryMs;
+    int telemetryCounter;
+    bool firstTelemetry = true;
 
-    // === Управление телеметрией ===
-    bool telemetryActive;   ///< Флаг: телеметрия активна
-    bool transportOnline;   ///< Флаг: Bluetooth подключён
-    unsigned long lastTelemetryMs; ///< Время последней отправки телеметрии
-    int telemetryCounter;   ///< Счётчик пакетов телеметрии
-    bool firstTelemetry;    ///< Флаг: первая отправка (все поля)
-
-    // === Обновление прошивки ===
+    // === OTA ===
     int otaFirmwareSize = 0;
     bool _pendingOtaSuccess = false;
     bool _needVersionCheck = false;
@@ -2445,70 +2354,25 @@ private:
     // === JSON-документы ===
     #pragma GCC diagnostic push
     #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-    StaticJsonDocument<768> inDoc;  ///< Входящий JSON
-    StaticJsonDocument<512> outDoc; ///< Исходящий JSON
+    StaticJsonDocument<768> inDoc;
+    StaticJsonDocument<512> outDoc;
     #pragma GCC diagnostic pop
 
-    // === Внутренние методы ===
-    
-    /**
-     * @brief Обработка входящей JSON-команды.
-     * 
-     * Разбирает JSON, определяет команду и выполняет соответствующее действие.
-     * 
-     * @param json Указатель на строку с JSON
-     */
+    // --- Диспетчер команд ---
     void processIncoming(const char* json);
 
-    /**
-     * @brief Формирование ответа на get_cfg.
-     * 
-     * Заполняет outDoc полями из settings или значениями по умолчанию.
-     */
-    void buildCfgResponse();
+    // --- Обработчики сложных команд ---
+    void cmdSetCfg(const char* rawJson);
+    void cmdOtaUpdate();
+    void cmdOtaData();
 
-    /**
-     * @brief Обработка команды set_cfg.
-     * 
-     * Обновляет локальные настройки из поля "data" входящего JSON.
-     */
-    void handleSetCfg();
-
-    /**
-     * @brief Отправка телеметрии.
-     * 
-     * Формирует и отправляет пакет телеметрии, если разрешено.
-     */
+    // --- Телеметрия ---
     void sendTelemetry();
-
-    /**
-     * @brief Формирование базового пакета телеметрии.
-     * 
-     * Заполняет поля, обновляемые каждые 150 мс.
-     */
     void buildFastJson();
-
-    /**
-     * @brief Добавление полей поездки.
-     * 
-     * Добавляет поля trip_a, fuel_a, avg и др. — обновляется каждые 600 мс.
-     */
     void addTripFields();
-
-    /**
-     * @brief Добавление сервисных полей.
-     * 
-     * Добавляет поля coolant_temp, dtc, tire и др. — обновляется каждые 1.5 с.
-     */
     void addServiceFields();
 
-    /**
-     * @brief Отправка JSON-пакета.
-     * 
-     * Сериализует outDoc и публикует в Topic::PROTOCOL.
-     * 
-     * @return true при успехе, false при ошибке
-     */
+    // --- Отправка ---
     bool sendJson();
 };
 
@@ -2521,7 +2385,14 @@ private:
 #include "simulator.h"
 #include "core/message.h"
 #include "core/logging.h"
+#include <math.h>
 
+/**
+ * @brief Инициализация симулятора.
+ * 
+ * Настраивает пины кнопок и потенциометра, калибрует педаль газа.
+ * Использует vTaskDelay вместо delay() чтобы не блокировать планировщик.
+ */
 bool Simulator::onInit() {
     memset(&pack, 0, sizeof(pack));
     pack.version = 3; pack.voltage = 12.7f; pack.not_fuel = true;
@@ -2534,11 +2405,12 @@ bool Simulator::onInit() {
     analogReadResolution(12);
     analogSetAttenuation(ADC_11db);
     
+    // Калибровка педали газа
     int sum = 0, minV = 4095, maxV = 0;
     for (int i = 0; i < 20; i++) {
         int v = analogRead(PIN_POT);
         sum += v; if (v < minV) minV = v; if (v > maxV) maxV = v;
-        delay(2);
+        vTaskDelay(pdMS_TO_TICKS(2));  // неблокирующая задержка
     }
     pedalConnected = (maxV - minV < 200 && sum / 20 < 4000);
     throttle = pedalConnected ? 0 : 0.3f;
@@ -2655,7 +2527,7 @@ void Simulator::onProcess() {
         pack.instant_fuel = getInstantFuel();
         pack.distance = distance;
         pack.fuel_used = fuelUsed;
-        pack.fuel_level_sensor = max(0.0f, fuelBase - fuelUsed);
+        pack.fuel_level_sensor = fmaxf(0.0f, fuelBase - fuelUsed);
         
         static int lc = 0; lc++;
         if (lc % 500 == 0) {
@@ -2720,6 +2592,18 @@ private:
 
 // START src/modules/storage.cpp
 // ======================================================================
+/**
+ * @file storage.cpp
+ * @brief Хранитель настроек и данных между сеансами (NVS).
+ * 
+ * Storage загружает сохранённые TripPack и SettingsPack из Flash при старте,
+ * публикует их для других модулей, и сохраняет при изменениях.
+ * 
+ * Настройки хранятся в формате JSON (ключ "settings") для устойчивости
+ * к изменению структуры между версиями прошивки.
+ * TripPack хранится бинарно (ключ "trip") — его структура стабильна.
+ */
+
 #include "storage.h"
 #include "core/message.h"
 #include "core/logging.h"
@@ -2731,20 +2615,34 @@ private:
 #pragma GCC diagnostic pop
 
 bool Storage::onInit() {
-    subscribeNew(Topic::CALCULATOR, sizeof(TripPack));
-    subscribeNew(Topic::STORAGE, sizeof(SettingsPack));
+    subscribeNew(Topic::CALCULATOR, sizeof(TripPack));  // для сохранения пробега
+    subscribeNew(Topic::STORAGE, sizeof(SettingsPack)); // для получения новых настроек
     loadAndPublish();
     return true;
 }
 
+/**
+ * @brief Обработка команд.
+ * 
+ * Storage больше не обрабатывает CMD_GET_CFG — это делает Protocol
+ * (он кэширует настройки и отвечает мгновенно).
+ * Storage только сохраняет данные.
+ */
 void Storage::onCommand(const CommandMsg& cmd) {
-    if (cmd.cmd == CMD_GET_CFG) handleGetCfg((int)cmd.value);
+    // Нет команд для обработки
 }
 
+/**
+ * @brief Обработка входящих данных.
+ * 
+ * При получении TripPack от Calculator — сравнивает с кэшем и сохраняет при изменениях.
+ * При получении SettingsPack — обновляет кэш и помечает как «грязный» для сохранения.
+ */
 void Storage::onData(uint16_t topic, const void* data) {
     if (topic == Topic::CALCULATOR) {
         const TripPack* p = (const TripPack*)data;
         
+        // Сравниваем только сохраняемые поля (не trip_cur, fuel_cur, avg_consumption)
         bool tripChanged = false;
         if (fabs((double)savedTrip.odo - (double)p->odo) > 0.1) tripChanged = true;
         if (fabsf(savedTrip.trip_a - p->trip_a) > 0.1) tripChanged = true;
@@ -2760,6 +2658,7 @@ void Storage::onData(uint16_t topic, const void* data) {
             LOG_INFO(name, "Trip saved: ODO=%.0f, fuel=%.1f", p->odo, p->fuel_level);
         }
         
+        // Обновляем fuel_level в SettingsPack при изменении
         if (fabsf(savedSettings.fuel_level - p->fuel_level) > 0.1f) {
             savedSettings.fuel_level = p->fuel_level;
             settingsDirty = true;
@@ -2770,11 +2669,16 @@ void Storage::onData(uint16_t topic, const void* data) {
         if (memcmp(&savedSettings, p, sizeof(SettingsPack)) != 0) {
             memcpy(&savedSettings, p, sizeof(SettingsPack));
             settingsDirty = true;
-            LOG_INFO(name, "Settings received, marking dirty");
         }
     }
 }
 
+/**
+ * @brief Периодическое сохранение настроек.
+ * 
+ * Сохраняет SettingsPack не чаще чем раз в 2 секунды после изменения.
+ * TripPack сохраняется немедленно при изменении (в onData).
+ */
 void Storage::onProcess() {
     unsigned long now = millis();
     if (settingsDirty && now - lastSettingsSave >= 2000) {
@@ -2784,6 +2688,13 @@ void Storage::onProcess() {
     }
 }
 
+/**
+ * @brief Загрузка данных из NVS и публикация для других модулей.
+ * 
+ * Вызывается один раз при старте.
+ * TripPack загружается бинарно, SettingsPack — из JSON-строки.
+ * При отсутствии данных создаются значения по умолчанию.
+ */
 void Storage::loadAndPublish() {
     prefs.begin("bkc_v2", false);
     
@@ -2800,9 +2711,10 @@ void Storage::loadAndPublish() {
     }
     memcpy(&savedTrip, &trip, sizeof(trip));
     
-    // --- SettingsPack (JSON) ---
+    // --- SettingsPack (JSON для гибкости при смене версий) ---
     SettingsPack cfg;
     memset(&cfg, 0, sizeof(cfg));
+    // Значения по умолчанию
     cfg.tank_capacity = 60;
     cfg.injector_count = 4;
     cfg.injector_flow = 250;
@@ -2816,6 +2728,7 @@ void Storage::loadAndPublish() {
         #pragma GCC diagnostic pop
         DeserializationError err = deserializeJson(doc, jsonStr);
         if (!err) {
+            // Читаем только те поля, которые есть в JSON (отсутствующие = по умолчанию)
             cfg.tank_capacity    = doc["tV"]    | cfg.tank_capacity;
             cfg.fuel_level       = doc["fuel"]  | cfg.fuel_level;
             cfg.injector_count   = doc["iCnt"]  | cfg.injector_count;
@@ -2836,6 +2749,7 @@ void Storage::loadAndPublish() {
     
     prefs.end();
     
+    // Публикуем для всех модулей (retain)
     publish(Topic::CALCULATOR, &trip, sizeof(trip));
     publish(Topic::STORAGE, &cfg, sizeof(cfg));
 }
@@ -2857,7 +2771,7 @@ void Storage::saveSettings() {
     doc["iPerf"] = savedSettings.injector_flow;
     doc["sSig"]  = savedSettings.pulses_per_meter;
     doc["kPrt"]  = savedSettings.kline_protocol;
-    doc["fw"] = savedSettings.fw_version[0] ? savedSettings.fw_version : FW_VERSION_STR;
+    doc["fw"]    = savedSettings.fw_version[0] ? savedSettings.fw_version : FW_VERSION_STR;
     
     String jsonStr;
     serializeJson(doc, jsonStr);
@@ -2912,13 +2826,11 @@ void Storage::handleSetCfg(const char* json) {
  * @file storage.h
  * @brief Модуль сохранения и загрузки данных во Flash-память.
  * 
- * Класс Storage использует ESP-IDF Preferences API для сохранения
- * критически важных данных между перезагрузками:
- * - Текущие значения пробега и расхода (TripPack)
- * - Настройки устройства (SettingsPack)
+ * Storage использует Preferences API для хранения критически важных данных
+ * между перезагрузками: TripPack (пробег, расход) и SettingsPack (настройки).
  * 
- * Также обрабатывает команды get_cfg и set_cfg, преобразуя
- * данные между JSON и бинарным форматом.
+ * Настройки хранятся в JSON для устойчивости к изменению структуры.
+ * TripPack — бинарно (структура стабильна).
  */
 
 #ifndef STORAGE_H
@@ -2928,137 +2840,30 @@ void Storage::handleSetCfg(const char* json) {
 #include "core/packets.h"
 #include <Preferences.h>
 
-/**
- * @class Storage
- * @brief Модуль хранения данных во Flash-памяти.
- * 
- * Отвечает за:
- * - Сохранение и загрузку TripPack и SettingsPack
- * - Обработку команд get_cfg / set_cfg
- * - Автоматическое сохранение при изменениях
- * - Поддержку JSON-интерфейса для настроек
- */
 class Storage : public Module {
 public:
-    /**
-     * @brief Конструктор модуля.
-     * 
-     * Устанавливает имя "Storage" для логирования.
-     */
     Storage() : Module("Storage") {}
 
 protected:
-    /**
-     * @brief Инициализация модуля.
-     * 
-     * Подписывается на Topic::CALCULATOR для сохранения TripPack.
-     * Загружает все сохранённые данные и публикует их.
-     * 
-     * @return true при успехе, false при ошибке
-     */
     bool onInit() override;
-
-    /**
-     * @brief Периодическая обработка.
-     * 
-     * Каждые 2 секунды после изменения сохраняет настройки в Flash.
-     * Обеспечивает надёжность при частых изменениях.
-     */
     void onProcess() override;
-
-    /**
-     * @brief Обработка команд.
-     * 
-     * Обрабатывает CMD_GET_CFG — запрос настроек.
-     * 
-     * @param cmd Команда от системы
-     */
     void onCommand(const CommandMsg& cmd) override;
-
-    /**
-     * @brief Обработка входящих данных.
-     * 
-     * При изменении TripPack сохраняет его в Flash.
-     * 
-     * @param topic Идентификатор топика
-     * @param data  Указатель на данные
-     */
     void onData(uint16_t topic, const void* data) override;
 
 private:
-    /**
-     * @brief Интерфейс к Flash-памяти.
-     * 
-     * Используется для сохранения и загрузки данных.
-     */
     Preferences prefs;
+    
+    TripPack     savedTrip;         ///< Последнее сохранённое состояние поездки
+    SettingsPack savedSettings;     ///< Последние сохранённые настройки
+    bool tripDirty = false;         ///< TripPack изменён и требует сохранения
+    bool settingsDirty = false;     ///< Настройки изменены и требуют сохранения
+    unsigned long lastSettingsSave = 0;  ///< Время последнего сохранения настроек
 
-    /**
-     * @brief Последнее сохранённое состояние поездки.
-     */
-    TripPack     savedTrip;
-
-    /**
-     * @brief Последние сохранённые настройки.
-     */
-    SettingsPack savedSettings;
-
-    /**
-     * @brief Флаги изменений данных.
-     * 
-     * tripDirty — TripPack изменён и требует сохранения
-     * settingsDirty — настройки изменены и требуют сохранения
-     */
-    bool tripDirty = false, settingsDirty = false;
-
-    /**
-     * @brief Время последней попытки сохранения.
-     * 
-     * lastTripSave — для TripPack
-     * lastSettingsSave — для настроек
-     * Используется для дебаунсинга и предотвращения частых записей
-     */
-    unsigned long lastTripSave = 0, lastSettingsSave = 0;
-
-    /**
-     * @brief Загрузка данных и публикация.
-     * 
-     * Загружает TripPack и SettingsPack из Flash и публикует их
-     * в соответствующие топики для других модулей.
-     */
-    void loadAndPublish();
-
-    /**
-     * @brief Сохранение данных поездки.
-     * 
-     * Записывает savedTrip в раздел "bkc_v2" под ключом "trip".
-     */
-    void saveTrip();
-
-    /**
-     * @brief Сохранение настроек.
-     * 
-     * Записывает savedSettings в раздел "bkc_v2" под ключом "settings".
-     */
-    void saveSettings();
-
-    /**
-     * @brief Обработка запроса настроек.
-     * 
-     * Формирует JSON-ответ с текущими настройками.
-     * 
-     * @param msgId Идентификатор сообщения для подтверждения
-     */
-    void handleGetCfg(int msgId);
-
-    /**
-     * @brief Обработка установки настроек.
-     * 
-     * Разбирает JSON и обновляет savedSettings.
-     * 
-     * @param json Указатель на JSON-строку с настройками
-     */
-    void handleSetCfg(const char* json);
+    void loadAndPublish();           ///< Загрузка из NVS и публикация для модулей
+    void saveTrip();                 ///< Сохранение TripPack бинарно
+    void saveSettings();             ///< Сохранение SettingsPack как JSON
+    void handleGetCfg(int msgId);    ///< Формирование JSON-ответа с настройками
+    void handleSetCfg(const char* json);  ///< Парсинг JSON и обновление настроек
 };
 
 #endif
@@ -3154,7 +2959,7 @@ void Transport::onData(uint16_t topic, const void* data) {
         // Преобразуем указатель на данные в строку (char*)
         // Это позволяет работать с данными как с текстом
         const char* msg = (const char*)data;
-        
+         
         // Записываем содержимое сообщения в Bluetooth-соединение
         // Передаем указатель на данные и их длину
         btSerial.write((uint8_t*)msg, strlen(msg));

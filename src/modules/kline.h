@@ -1,12 +1,16 @@
 /**
  * @file kline.h
- * @brief Модуль эмуляции данных шины K-Line.
+ * @brief Модуль диагностики по шине K-Line (ISO 9141-2).
  * 
- * Класс KLine генерирует реалистичные данные, имитирующие информацию,
- * поступающую с автомобильного ЭБУ по шине K-Line.
+ * Аппаратная основа:
+ * - MC33290 Level Shifter
+ * - UART2: TX=GPIO17, RX=GPIO16
+ * - Скорость: 10400 бод, 8N1
  * 
- * Публикует данные в топик Topic::KLINE каждые 1000 мс.
- * Поддерживает команды сброса DTC и диагностики протокола.
+ * Протокол:
+ * - Инициализация: 5-baud slow init (адрес 0x33)
+ * - Адреса ЭБУ: ECM=0x7E0, TCM=0x7E1
+ * - Запрос данных: Mode 01 (стандартный OBD2), Mode 21 (Toyota extended)
  */
 
 #ifndef KLINE_H
@@ -14,74 +18,88 @@
 
 #include "core/module.h"
 #include "core/packets.h"
+#include <HardwareSerial.h>
 
-/**
- * @class KLine
- * @brief Модуль эмуляции данных K-Line.
- * 
- * Генерирует и публикует данные, характерные для шины K-Line:
- * - Температура ОЖ и масла АКПП
- * - Напряжение бортсети
- * - Коды неисправностей (DTC)
- * - Положение селектора АКПП
- * 
- * Используется для тестирования и демонстрации функциональности.
- */
+// Пины UART2
+#define KLINE_TX 17
+#define KLINE_RX 16
+
+// Адреса ЭБУ (12-битные, передаются в sendFrame по частям)
+#define KLINE_ECU_ECM  0x7E0
+#define KLINE_ECU_TCM  0x7E1
+
+// Таймауты ISO 9141-2 (мс)
+#define KLINE_W1_TIMEOUT   25
+#define KLINE_W4_TIMEOUT  300
+#define KLINE_INIT_RETRIES  3
+
+// Размеры буферов
+#define KLINE_RX_BUF  256
+#define KLINE_TX_BUF  64
+
+enum class KlineState : uint8_t {
+    IDLE, WAIT_POWER_ON, SEND_ADDR_LOW, SEND_ADDR_BITS,
+    WAIT_SYNC, WAIT_KEY_BYTE1, WAIT_KEY_BYTE2, WAIT_ECU_ID,
+    CONNECTED, FAILED
+};
+
 class KLine : public Module {
 public:
-    /**
-     * @brief Конструктор модуля.
-     * 
-     * Устанавливает имя "KLine" для логирования.
-     */
     KLine() : Module("KLine") {}
 
 protected:
-    /**
-     * @brief Инициализация модуля.
-     * 
-     * Инициализирует структуру KlinePack начальными значениями:
-     * - Температура ОЖ: 90°C
-     * - Температура АКПП: 75°C
-     * - Позиция селектора: D (3)
-     * - Коды ошибок: P0135;P0141
-     * 
-     * @return true — всегда успешна
-     */
     bool onInit() override;
-
-    /**
-     * @brief Периодическая генерация данных.
-     * 
-     * Каждую секунду обновляет значения температур, напряжения,
-     * оборотов и уровня топлива с небольшим случайным разбросом.
-     * Публикует обновлённые данные в Topic::KLINE.
-     */
     void onProcess() override;
-
-    /**
-     * @brief Обработка входящих команд.
-     * 
-     * Поддерживает команды:
-     * - CMD_KL_CLEAR_DTC — очистка кодов неисправностей
-     * - CMD_KL_DETECT_PROTO — диагностика протокола (логирование)
-     * 
-     * @param cmd Команда от системы
-     */
     void onCommand(const CommandMsg& cmd) override;
 
 private:
-    /**
-     * @brief Структура данных K-Line.
-     * 
-     * Содержит все параметры, которые публикуются в Topic::KLINE.
-     */
     KlinePack pack;
-
-    /**
-     * @brief Время последней публикации данных (мс).
-     */
     unsigned long lastPublish = 0;
+
+    bool _realMode = true;
+    bool _connected = false;
+    HardwareSerial* _uart = nullptr;
+    
+    KlineState _state = KlineState::IDLE;
+    unsigned long _stateTimer = 0;
+    uint8_t _retries = 0;
+    uint8_t _addrBitIdx = 0;
+    uint8_t _ecuId = 0;
+    
+    struct {
+        bool readDtc    : 1;
+        bool clearDtc   : 1;
+        bool resetTcm   : 1;
+        bool pumpAbs    : 1;
+        bool detectProto: 1;
+    } _cmd;
+    
+    uint8_t _rxBuf[KLINE_RX_BUF];
+    uint8_t _txBuf[KLINE_TX_BUF];
+    uint16_t _rxLen = 0;
+
+    void uartInit();
+    void startInit();
+    void processInit();
+    
+    void txByte(uint8_t b);
+    uint8_t rxByte(unsigned long timeoutMs);
+    void sendFrame(uint16_t ecu, uint8_t mode, uint16_t pid);
+    static uint8_t checksum(const uint8_t* data, int len);
+    int readFrame(unsigned long timeoutMs);
+    
+    float readCoolantTemp();
+    float readAtfTemp();
+    float readVoltage();
+    float readFuelPercent();
+    float readOutputShaftRpm();
+    int readDtcCodes();
+    bool clearDtc();
+    bool readGear();
+    void resetTcmAdaptation();
+    bool fastInit();
+    
+    void simulateData();
 };
 
 #endif

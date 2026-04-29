@@ -85,7 +85,7 @@ void Transport::onData(uint16_t topic, const void* data) {
         // Преобразуем указатель на данные в строку (char*)
         // Это позволяет работать с данными как с текстом
         const char* msg = (const char*)data;
-        
+         
         // Записываем содержимое сообщения в Bluetooth-соединение
         // Передаем указатель на данные и их длину
         btSerial.write((uint8_t*)msg, strlen(msg));
